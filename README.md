@@ -186,7 +186,7 @@ Tests live in `KatanaTests` and use `assertMacroExpansion` to verify the *text* 
 
 ## Design
 
-See [`Docs/design.md`](Docs/design.md) for the architectural rationale and [`Docs/swift6.md`](Docs/swift6.md) for the Swift 6 concurrency rules the library is built on.
+See [`Documentation/design.md`](Documentation/design.md) for the architectural rationale and [`Documentation/swift6.md`](Documentation/swift6.md) for the Swift 6 concurrency rules the library is built on.
 
 ## License
 

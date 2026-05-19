@@ -14,8 +14,8 @@ swift run KatanaClient                         # Run the example client
 ## Design Docs
 
 Before implementing anything, read:
-- `Docs/design.md` — DI architecture, macro contract, scope rules
-- `Docs/swift6.md` — Swift 6 concurrency rules (Container isolation, Sendable requirements, factory closures)
+- `Documentation/design.md` — DI architecture, macro contract, scope rules
+- `Documentation/swift6.md` — Swift 6 concurrency rules (Container isolation, Sendable requirements, factory closures)
 
 ## Architecture
 
