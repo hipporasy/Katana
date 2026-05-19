@@ -2,7 +2,7 @@
 
 A Swift 6 macro-based dependency injection framework. Dagger/Hilt semantics, Swift idioms, minimal runtime.
 
-**[API Documentation →](https://hipporasy.github.io/Katana/)**
+**[API Documentation →](https://katana.hipporasy.dev)**
 
 ```swift
 @Injectable

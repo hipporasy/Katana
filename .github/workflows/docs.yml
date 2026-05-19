@@ -33,8 +33,10 @@ jobs:
             --target Katana \
             --disable-indexing \
             --transform-for-static-hosting \
-            --hosting-base-path Katana \
             --output-path ./docs
+
+      - name: Add CNAME (project-level custom domain)
+        run: echo "katana.hipporasy.dev" > ./docs/CNAME
 
       - name: Patch root redirect
         run: |
