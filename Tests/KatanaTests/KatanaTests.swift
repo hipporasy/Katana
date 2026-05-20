@@ -5,6 +5,8 @@ import KatanaMacros
 
 nonisolated(unsafe) let testMacros: [String: Macro.Type] = [
     "Injectable": InjectableMacro.self,
+    "Container": ContainerMacro.self,
+    "TestContainer": TestContainerMacro.self,
 ]
 
 final class InjectableMacroTests: XCTestCase {
@@ -405,6 +407,300 @@ final class InjectableMacroTests: XCTestCase {
                 nonisolated static func resolve(from container: Container) async -> sending Self {
                     await Self(logger: container.resolve(Logger.self))
                 }
+            }
+            """,
+            macros: testMacros
+        )
+    }
+}
+
+// MARK: - @Container macro tests
+
+final class ContainerMacroTests: XCTestCase {
+
+    func testEmptyTypeListDiagnoses() {
+        assertMacroExpansion(
+            """
+            @Container
+            final class App {}
+            """,
+            expandedSource: """
+            final class App {}
+            """,
+            diagnostics: [
+                .init(
+                    message: "@Container requires at least one type to register, e.g. @Container(Logger.self).",
+                    line: 1,
+                    column: 1
+                )
+            ],
+            macros: testMacros
+        )
+    }
+
+    func testNotAClassDiagnoses() {
+        assertMacroExpansion(
+            """
+            @Container(Logger.self)
+            struct App {}
+            """,
+            expandedSource: """
+            struct App {}
+            """,
+            diagnostics: [
+                .init(
+                    message: "@Container can only be applied to a class. Use a class declaration.",
+                    line: 1,
+                    column: 1
+                )
+            ],
+            macros: testMacros
+        )
+    }
+
+    func testSingleTypeEmitsResolveOverloadAndSnapshot() {
+        assertMacroExpansion(
+            """
+            @Container(Logger.self)
+            final class App {}
+            """,
+            expandedSource: """
+            final class App {
+
+                private let __katanaContainer: Container
+
+                public init(_ customize: (@Sendable (Container) async -> Void)? = nil) async {
+                    let inner = Container()
+                    await inner.register(Logger.self)
+                    self.__katanaContainer = inner
+                    await customize?(inner)
+                }
+
+                public func resolve(_: Logger.Type) async -> Logger {
+                    await __katanaContainer.resolve(Logger.self)
+                }
+
+                public struct Snapshot: Resolver {
+                    public let logger: Logger
+
+                    public init(logger: Logger) {
+                        self.logger = logger
+                    }
+
+                    public func resolve(_: Logger.Type) -> Logger {
+                        logger
+                    }
+
+                    public func resolve<T: Sendable>(_ type: T.Type) -> T {
+                        switch ObjectIdentifier(type) {
+                        case ObjectIdentifier(Logger.self):
+                            return logger as! T
+                        default:
+                            preconditionFailure("\\(type) is not in App.Snapshot. Add it to @Container(...).")
+                        }
+                    }
+                }
+
+                public func snapshot() async -> Snapshot {
+                    let logger = await __katanaContainer.resolve(Logger.self)
+                    return Snapshot(logger: logger)
+                }
+
+                #if canImport(SwiftUI)
+                @propertyWrapper
+                public struct Inject<Value: Sendable>: DynamicProperty {
+                    @Environment(\\.katanaResolver) private var resolver
+                    public init() {
+                    }
+                    public var wrappedValue: Value {
+                        guard let snapshot = resolver as? Snapshot else {
+                            preconditionFailure(
+                                "@App.Inject expected App.Snapshot in the environment but found \\(type(of: resolver)). Install via `.katana(await App().snapshot())`."
+                            )
+                        }
+                        return snapshot.resolve(Value.self)
+                    }
+                }
+                #endif
+            }
+            """,
+            macros: testMacros
+        )
+    }
+
+    func testEmitsOverridePostConstructionAndMarker() {
+        // @TestContainer adds two override methods on top of @Container's
+        // emission, plus a TestContainerMarker conformance via extension.
+        // This test pins the additive bits; the Container expansion shape is
+        // covered by testSingleTypeEmitsResolveOverloadAndSnapshot.
+        assertMacroExpansion(
+            """
+            @TestContainer(Logger.self)
+            final class TestApp {}
+            """,
+            expandedSource: """
+            final class TestApp {
+
+                private let __katanaContainer: Container
+
+                public init(_ customize: (@Sendable (Container) async -> Void)? = nil) async {
+                    let inner = Container()
+                    await inner.register(Logger.self)
+                    self.__katanaContainer = inner
+                    await customize?(inner)
+                }
+
+                public func resolve(_: Logger.Type) async -> Logger {
+                    await __katanaContainer.resolve(Logger.self)
+                }
+
+                public struct Snapshot: Resolver {
+                    public let logger: Logger
+
+                    public init(logger: Logger) {
+                        self.logger = logger
+                    }
+
+                    public func resolve(_: Logger.Type) -> Logger {
+                        logger
+                    }
+
+                    public func resolve<T: Sendable>(_ type: T.Type) -> T {
+                        switch ObjectIdentifier(type) {
+                        case ObjectIdentifier(Logger.self):
+                            return logger as! T
+                        default:
+                            preconditionFailure("\\(type) is not in TestApp.Snapshot. Add it to @Container(...).")
+                        }
+                    }
+                }
+
+                public func snapshot() async -> Snapshot {
+                    let logger = await __katanaContainer.resolve(Logger.self)
+                    return Snapshot(logger: logger)
+                }
+
+                #if canImport(SwiftUI)
+                @propertyWrapper
+                public struct Inject<Value: Sendable>: DynamicProperty {
+                    @Environment(\\.katanaResolver) private var resolver
+                    public init() {
+                    }
+                    public var wrappedValue: Value {
+                        guard let snapshot = resolver as? Snapshot else {
+                            preconditionFailure(
+                                "@TestApp.Inject expected TestApp.Snapshot in the environment but found \\(type(of: resolver)). Install via `.katana(await TestApp().snapshot())`."
+                            )
+                        }
+                        return snapshot.resolve(Value.self)
+                    }
+                }
+                #endif
+
+                /// Replaces a registered type with an instance after construction.
+                /// Clears any cached singleton so the next resolve uses the new value.
+                public func override<T: Injectable & Sendable>(_ type: T.Type, with instance: T) async {
+                    await __katanaContainer.override(type, with: instance)
+                }
+
+                /// Replaces a registered type with a factory after construction.
+                /// Clears any cached singleton so the next resolve uses the new factory.
+                public func override<T: Injectable & Sendable>(
+                    _ type: T.Type,
+                    factory: @escaping @Sendable (Container) async -> T
+                ) async {
+                    await __katanaContainer.override(type, factory: factory)
+                }
+            }
+
+            extension TestApp: TestContainerMarker {
+            }
+            """,
+            macros: testMacros
+        )
+    }
+}
+
+// MARK: - @Container two-type expansion (separate suite, kept short)
+
+final class ContainerMacroTwoTypeTests: XCTestCase {
+    func testTwoTypesEmitOverloadsForBoth() {
+        assertMacroExpansion(
+            """
+            @Container(Logger.self, Network.self)
+            final class App {}
+            """,
+            expandedSource: """
+            final class App {
+
+                private let __katanaContainer: Container
+
+                public init(_ customize: (@Sendable (Container) async -> Void)? = nil) async {
+                    let inner = Container()
+                    await inner.register(Logger.self)
+                    await inner.register(Network.self)
+                    self.__katanaContainer = inner
+                    await customize?(inner)
+                }
+
+                public func resolve(_: Logger.Type) async -> Logger {
+                    await __katanaContainer.resolve(Logger.self)
+                }
+
+                public func resolve(_: Network.Type) async -> Network {
+                    await __katanaContainer.resolve(Network.self)
+                }
+
+                public struct Snapshot: Resolver {
+                    public let logger: Logger
+                    public let network: Network
+
+                    public init(logger: Logger, network: Network) {
+                        self.logger = logger
+                        self.network = network
+                    }
+
+                    public func resolve(_: Logger.Type) -> Logger {
+                        logger
+                    }
+                    public func resolve(_: Network.Type) -> Network {
+                        network
+                    }
+
+                    public func resolve<T: Sendable>(_ type: T.Type) -> T {
+                        switch ObjectIdentifier(type) {
+                        case ObjectIdentifier(Logger.self):
+                            return logger as! T
+                    case ObjectIdentifier(Network.self):
+                            return network as! T
+                        default:
+                            preconditionFailure("\\(type) is not in App.Snapshot. Add it to @Container(...).")
+                        }
+                    }
+                }
+
+                public func snapshot() async -> Snapshot {
+                    let logger = await __katanaContainer.resolve(Logger.self)
+                    let network = await __katanaContainer.resolve(Network.self)
+                    return Snapshot(logger: logger, network: network)
+                }
+
+                #if canImport(SwiftUI)
+                @propertyWrapper
+                public struct Inject<Value: Sendable>: DynamicProperty {
+                    @Environment(\\.katanaResolver) private var resolver
+                    public init() {
+                    }
+                    public var wrappedValue: Value {
+                        guard let snapshot = resolver as? Snapshot else {
+                            preconditionFailure(
+                                "@App.Inject expected App.Snapshot in the environment but found \\(type(of: resolver)). Install via `.katana(await App().snapshot())`."
+                            )
+                        }
+                        return snapshot.resolve(Value.self)
+                    }
+                }
+                #endif
             }
             """,
             macros: testMacros

@@ -44,6 +44,46 @@ public actor Container {
         }
     }
 
+    // MARK: - Override (semantic alias for replacing an earlier registration)
+
+    /// Replaces any prior registration of `type` with a factory that always
+    /// returns `instance`. Use this in tests to swap a dependency for a spy,
+    /// stub, or pre-built fake.
+    ///
+    /// Any previously cached singleton for `type` is cleared, so the override
+    /// applies even if the type was already resolved.
+    public func override<T: Injectable & Sendable>(_ type: T.Type, with instance: T) {
+        let key = ObjectIdentifier(type)
+        singletons[key] = nil
+        sendableFactories[key] = SendableEntry(scope: T.scope) { _ in instance }
+    }
+
+    /// Replaces any prior registration of `type` with the given factory. The
+    /// cached singleton (if any) is cleared so the next resolve goes through
+    /// the new factory.
+    public func override<T: Injectable & Sendable>(
+        _ type: T.Type,
+        factory: @escaping @Sendable (Container) async -> T
+    ) {
+        let key = ObjectIdentifier(type)
+        singletons[key] = nil
+        sendableFactories[key] = SendableEntry(scope: T.scope) { container in
+            await factory(container)
+        }
+    }
+
+    /// Replaces any prior registration of a non-`Sendable` transient `type`.
+    /// Non-`Sendable` instances cannot be reused across resolves, so the
+    /// instance-based `override(_:with:)` does not apply here — use a factory.
+    public func override<T: Injectable>(
+        _ type: T.Type,
+        factory: @escaping @Sendable (Container) async -> sending T
+    ) {
+        transientFactories[ObjectIdentifier(type)] = { container in
+            await factory(container)
+        }
+    }
+
     // MARK: - Resolve
 
     public func resolve<T: Injectable & Sendable>(_ type: T.Type) async -> T {
@@ -71,5 +111,31 @@ public actor Container {
             return await factory(self) as! T
         }
         return await T.resolve(from: self)
+    }
+
+    // MARK: - Snapshot
+
+    /// Eagerly resolves every registered singleton and returns a type-erased
+    /// `AnyResolver`. Use this at app launch to bridge from the actor's async
+    /// API into SwiftUI's sync world (see `@Inject`).
+    ///
+    /// Transient registrations are intentionally excluded — each transient
+    /// resolve must still go through the container so a fresh instance is
+    /// produced per call.
+    ///
+    /// For compile-time-checked typed snapshots, use the `@Container` macro
+    /// which generates a nested `Snapshot` type per dependency graph.
+    public func snapshot() async -> AnyResolver {
+        for (key, entry) in sendableFactories where entry.scope == .singleton {
+            if singletons[key] == nil {
+                singletons[key] = await entry.factory(self)
+            }
+        }
+        var storage: [ObjectIdentifier: any Sendable] = [:]
+        storage.reserveCapacity(singletons.count)
+        for (key, value) in singletons {
+            storage[key] = value
+        }
+        return AnyResolver(storage)
     }
 }

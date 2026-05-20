@@ -146,5 +146,7 @@ private enum InjectableMessage: String, DiagnosticMessage {
 struct KatanaPlugin: CompilerPlugin {
     let providingMacros: [Macro.Type] = [
         InjectableMacro.self,
+        ContainerMacro.self,
+        TestContainerMacro.self,
     ]
 }

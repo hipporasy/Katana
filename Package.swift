@@ -8,6 +8,7 @@ let package = Package(
     products: [
         .library(name: "Katana", targets: ["Katana"]),
         .executable(name: "KatanaClient", targets: ["KatanaClient"]),
+        .executable(name: "Example", targets: ["Example"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-syntax.git", from: "600.0.0"),
@@ -41,12 +42,28 @@ let package = Package(
                 .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
             ]
         ),
+        .executableTarget(
+            name: "Example",
+            dependencies: ["Katana"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
+            ]
+        ),
         .testTarget(
             name: "KatanaTests",
             dependencies: [
                 "KatanaMacros",
                 .product(name: "SwiftSyntaxMacrosTestSupport", package: "swift-syntax"),
             ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
+            ]
+        ),
+        .testTarget(
+            name: "ExampleTests",
+            dependencies: ["Example", "Katana"],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
                 .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
