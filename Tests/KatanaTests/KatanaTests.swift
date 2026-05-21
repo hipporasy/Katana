@@ -7,6 +7,7 @@ nonisolated(unsafe) let testMacros: [String: Macro.Type] = [
     "Injectable": InjectableMacro.self,
     "Container": ContainerMacro.self,
     "TestContainer": TestContainerMacro.self,
+    "Module": ModuleMacro.self,
 ]
 
 final class InjectableMacroTests: XCTestCase {
@@ -621,6 +622,76 @@ final class ContainerMacroTests: XCTestCase {
     }
 }
 
+// MARK: - @Module macro tests
+
+final class ModuleMacroTests: XCTestCase {
+
+    func testEmitsTypesAndConformance() {
+        assertMacroExpansion(
+            """
+            @Module(Logger.self, NetworkClient.self)
+            enum ServiceModule {}
+            """,
+            expandedSource: """
+            enum ServiceModule {
+
+                public static let types: [any (Injectable & Sendable).Type] = [
+                    Logger.self,
+                        NetworkClient.self
+                ]
+            }
+
+            extension ServiceModule: KatanaModule {
+            }
+            """,
+            macros: testMacros
+        )
+    }
+
+    func testEmptyTypeListDiagnoses() {
+        assertMacroExpansion(
+            """
+            @Module
+            enum EmptyModule {}
+            """,
+            expandedSource: """
+            enum EmptyModule {}
+
+            extension EmptyModule: KatanaModule {
+            }
+            """,
+            diagnostics: [
+                .init(
+                    message: "@Module requires at least one type, e.g. @Module(Logger.self).",
+                    line: 1,
+                    column: 1
+                )
+            ],
+            macros: testMacros
+        )
+    }
+
+    func testAppliedToClassDiagnoses() {
+        assertMacroExpansion(
+            """
+            @Module(Logger.self)
+            final class WrongTarget {}
+            """,
+            expandedSource: """
+            final class WrongTarget {}
+            """,
+            diagnostics: [
+                .init(
+                    message: "@Module can only be applied to an enum. Use a case-less enum for module grouping.",
+                    line: 1,
+                    column: 1
+                )
+            ],
+            macros: testMacros
+        )
+    }
+}
+
 // MARK: - @Container two-type expansion (separate suite, kept short)
 
 final class ContainerMacroTwoTypeTests: XCTestCase {
@@ -671,7 +742,7 @@ final class ContainerMacroTwoTypeTests: XCTestCase {
                         switch ObjectIdentifier(type) {
                         case ObjectIdentifier(Logger.self):
                             return logger as! T
-                    case ObjectIdentifier(Network.self):
+                        case ObjectIdentifier(Network.self):
                             return network as! T
                         default:
                             preconditionFailure("\\(type) is not in App.Snapshot. Add it to @Container(...).")

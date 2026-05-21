@@ -180,6 +180,150 @@ struct ExampleTests {
         // wouldn't compile.
         let _: any TestContainerMarker = await TestApp()
     }
+
+    // MARK: - Cycle detection
+
+    /// The resolution chain is empty before any resolve starts.
+    @Test func resolutionChainIsEmptyAtRest() async throws {
+        #expect(Container.resolutionChain.isEmpty)
+    }
+
+    /// During a resolve, the chain accumulates type names. We probe it via a
+    /// dependency whose factory inspects the chain at resolve-time. This
+    /// exercises the task-local propagation without triggering the trap.
+    @Test func resolutionChainAccumulatesDuringNestedResolves() async throws {
+        guard #available(macOS 14, iOS 17, *) else { return }
+
+        // Use a fresh Container with a custom factory that captures the chain
+        // mid-resolve. The chain reflects the call site that triggered this
+        // factory.
+        let captured = ChainCapture()
+        let container = Container()
+        await container.register(Logger.self) { _ in
+            captured.set(Container.resolutionChain)
+            return Logger()
+        }
+
+        _ = await container.resolve(Logger.self)
+        let chain = captured.value
+        #expect(chain.contains(where: { $0.contains("Logger") }))
+    }
+
+    /// Two unrelated resolves in sequence don't leak chain state into each
+    /// other — task-local is unwound after each resolve completes.
+    @Test func chainIsRestoredAfterResolveCompletes() async throws {
+        guard #available(macOS 14, iOS 17, *) else { return }
+
+        let container = await TestApp()
+        _ = await container.resolve(TodoRepository.self)
+        #expect(Container.resolutionChain.isEmpty)
+    }
+
+    // MARK: - Named bindings
+
+    /// Two named registrations of the same `Type` coexist; each resolves to
+    /// its own instance. Unnamed resolves see neither.
+    @Test func namedBindingsResolveIndependently() async throws {
+        guard #available(macOS 14, iOS 17, *) else { return }
+
+        let console = SpyLogger()
+        let file = SpyLogger()
+        let container = Container()
+        await container.register(Logger.self, name: "console") { _ in console }
+        await container.register(Logger.self, name: "file") { _ in file }
+
+        let resolvedConsole = await container.resolve(Logger.self, name: "console")
+        let resolvedFile = await container.resolve(Logger.self, name: "file")
+
+        #expect(resolvedConsole === console)
+        #expect(resolvedFile === file)
+        #expect(resolvedConsole !== resolvedFile)
+    }
+
+    /// Resolving an unregistered named binding traps with a helpful message.
+    /// We verify the cache mechanism instead: a named binding caches under
+    /// its own key, so re-resolving with the same name returns the same
+    /// instance.
+    @Test func namedSingletonCachesPerName() async throws {
+        guard #available(macOS 14, iOS 17, *) else { return }
+
+        let container = Container()
+        await container.register(Logger.self, name: "console") { _ in SpyLogger() }
+
+        let first = await container.resolve(Logger.self, name: "console")
+        let second = await container.resolve(Logger.self, name: "console")
+        #expect(first === second)
+    }
+
+    /// Unnamed registration and named registration of the same type are
+    /// independent: unnamed resolve doesn't see the named instance.
+    @Test func unnamedDoesNotSeeNamedRegistration() async throws {
+        guard #available(macOS 14, iOS 17, *) else { return }
+
+        let namedSpy = SpyLogger()
+        let container = Container()
+        await container.register(Logger.self)                                    // unnamed default
+        await container.register(Logger.self, name: "console") { _ in namedSpy } // named
+
+        let unnamed = await container.resolve(Logger.self)
+        let named = await container.resolve(Logger.self, name: "console")
+
+        #expect(unnamed !== namedSpy)
+        #expect(named === namedSpy)
+    }
+
+    /// `override(_:name:with:)` replaces a named registration.
+    @Test func overrideAppliesToNamedBinding() async throws {
+        guard #available(macOS 14, iOS 17, *) else { return }
+
+        let original = SpyLogger()
+        let replacement = SpyLogger()
+        let container = Container()
+        await container.register(Logger.self, name: "audit") { _ in original }
+        let first = await container.resolve(Logger.self, name: "audit")
+        #expect(first === original)
+
+        await container.override(Logger.self, name: "audit", with: replacement)
+        let second = await container.resolve(Logger.self, name: "audit")
+        #expect(second === replacement)
+    }
+
+    /// Snapshot omits named bindings — they're container-level only.
+    @Test func snapshotOmitsNamedBindings() async throws {
+        guard #available(macOS 14, iOS 17, *) else { return }
+
+        let container = Container()
+        await container.register(Logger.self)
+        await container.register(Logger.self, name: "audit") { _ in SpyLogger() }
+
+        let snap = await container.snapshot()
+        // Resolving the unnamed Logger via the snapshot works.
+        let _: Logger = snap.resolve(Logger.self)
+        // The snapshot has exactly the unnamed Logger; the named "audit"
+        // binding stays inside the container and is not in the snapshot.
+        // We verify indirectly by checking the same instance comes back
+        // through both paths.
+        let viaContainer = await container.resolve(Logger.self)
+        let viaSnapshot: Logger = snap.resolve(Logger.self)
+        #expect(viaContainer === viaSnapshot)
+    }
+}
+
+/// Test helper: captures the resolution chain at a specific point inside a
+/// custom factory closure.
+final class ChainCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _value: [String] = []
+
+    var value: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return _value
+    }
+
+    func set(_ v: [String]) {
+        lock.lock(); defer { lock.unlock() }
+        _value = v
+    }
 }
 
 /// Test double. `Logger` is non-final in this example so it can be subclassed

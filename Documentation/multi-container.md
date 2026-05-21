@@ -145,11 +145,11 @@ The graph annotation is the safety contract. Refactor a dep into the wrong graph
 - **Don't** double-register a singleton in two graphs and hope they share — they won't. Pick one graph as the owner, pass the resolved instance into the other via override.
 - **Don't** use bare `@Inject` when more than one snapshot is in scope. The downcast targets *one* type; the wrong snapshot triggers a runtime trap with an unhelpful message.
 
-## Future work
+## Avoiding the boilerplate with `@KatanaApp`
 
-The manual env-key boilerplate above is real friction. A future macro enhancement could emit a peer `extension EnvironmentValues` + dedicated `Inject` per graph automatically, eliminating the one-off setup. This is gated on Swift's peer-macro restrictions at global scope (see `roadmap.md`).
+The manual env-key plumbing above is only needed when you stick with plain `@Container`. The **`@KatanaApp`** path ([`modules.md`](modules.md)) generates a per-graph env key, view modifier, and `Inject` wrapper for every app it produces — so multi-graph apps work without any of the manual setup in this guide.
 
-Until then: one extension and one property wrapper per extra graph is the cost. For most apps, that's one graph total and zero boilerplate.
+If you have more than one graph, prefer `@KatanaApp` over `@Container`. The plugin pays for itself the moment you have to write a second graph's env key by hand.
 
 ## See also
 

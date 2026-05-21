@@ -322,21 +322,51 @@ Moved to [`multi-container.md`](multi-container.md). The roadmap keeps only the 
 
 ---
 
-## Phase 3 — Optional polish
+## Phase 3 — `@Module` for cross-file graph composition
 
-These land only if real usage demands them.
+The Hilt-shaped module story. Splits a graph across files while keeping the typed `resolve(_:)` overloads. Implemented as a **SwiftPM build-tool plugin**, not a macro — Swift macros can't see across files.
 
-### 3a. `@Container(modules: [DataModule.self, UIModule.self])`
+Full design in [`modules.md`](modules.md). High-level shape:
 
-For apps whose registration list grows past ~15 types. Modules are `enum`s with a static `types` property; the macro reads the lists and merges. No new safety properties, just organisation.
+```swift
+@Module(TodoRepository.self, UserRepository.self)
+enum RepositoryModule {}
 
-### 3b. Runtime cycle detection
+@Module(Logger.self, NetworkClient.self)
+enum ServiceModule {}
 
-Track an active-resolution stack inside `Container`; on re-entry for the same type, trap with a readable cycle description. Compile-time cycle detection is gated on cross-file macro analysis and stays out of scope.
+@KatanaApp(modules: [RepositoryModule.self, ServiceModule.self, TodoListViewModel.self])
+public final class App {}
+```
 
-### 3c. Named bindings / qualifiers
+Plugin scans `@Module` declarations across the target, aggregates the type lists, generates an extension on `App` structurally identical to what `@Container` emits today.
 
-For "I want two `Logger`s, one console and one file." Add `@Injectable(name: "console")` + `container.resolve(Logger.self, name: "console")`. Wait for a real use case before adding API surface.
+Sub-phases:
+
+- **3a — `@Module` macro stub.** Symbol exists, validates `.self` literals, emits nothing. Sets the API surface.
+- **3b — SwiftPM build plugin.** `KatanaCodegenPlugin` + supporting executable + scanner library. Real work; days, not hours.
+- **3c — `ModularExample` target.** Parallel example demonstrating the modular shape end-to-end.
+- **3d — Docs.** `modules.md` becomes the user guide; `multi-container.md` "future work" section retired.
+
+**Decision gate**: build when a real consumer's `@Container(...)` list crosses ~20 types or spans multiple team-owned features. Speculative codegen ages badly.
+
+## Phase 4 — Smaller polish
+
+### 4a. Runtime cycle detection — **shipped**
+
+`Container.resolve` tracks the active-resolution chain via `@TaskLocal Container.resolutionChain`. Cycles trap with `A → B → A` style description plus remediation hints. Chain propagates through nested resolves, macro-generated `T.resolve(from:)`, and factory closures.
+
+Limit: non-`Sendable` transient path detects entry into a cycle but doesn't extend the chain through it (the `sending T` return can't pass through a `withValue` closure). Documented in `Container.swift` and the CHANGELOG.
+
+Compile-time cycle detection is gated on cross-file macro analysis and stays out of scope — the `@Module` plugin could conceivably close this gap by walking the dependency graph at build time, but the runtime trap is the v1 answer.
+
+### 4b. Named bindings / qualifiers — **shipped**
+
+`register`, `resolve`, and `override` gained optional `name: String? = nil` parameters. Internal storage rekeyed to a composite `(ObjectIdentifier, String?)`. Multiple instances of the same `Type` coexist when given different names.
+
+Trade-off: the macro paths (`@Container`, `@KatanaApp`) don't auto-handle named bindings — they remain a container-level escape hatch for "I need two `Logger`s." For compile-time-safe disambiguation, prefer protocol abstractions over names.
+
+`Container.snapshot()` includes only **unnamed** singletons; named bindings stay container-level and are accessed via `await container.resolve(_:name:)`.
 
 ---
 
@@ -354,6 +384,7 @@ For "I want two `Logger`s, one console and one file." Add `@Injectable(name: "co
 | `Tests/ExampleTests/`             | Test overrides switch to closure-on-`@Container`                              |
 | `Documentation/mvvm.md`           | Update view + composition-root snippets to use `App` + `@App.Inject`         |
 | `Documentation/multi-container.md` | NEW — extracted from this roadmap once Phase 2b lands                       |
+| `Documentation/modules.md`        | NEW — `@Module` / `@KatanaApp` design for Phase 3                            |
 | `README.md`                       | Feature list adds compile-time checking + typed `@Inject`                     |
 
 ---
@@ -367,9 +398,18 @@ For "I want two `Logger`s, one console and one file." Add `@Injectable(name: "co
 5. **Docs sweep** — update `mvvm.md` and `README.md` to match. Promote the multi-container section into `Documentation/multi-container.md`.
 6. **Phase 3+** items — only on demand.
 
-Cut points:
+Shipping: everything from Phase 1 through Phase 4 lands in **0.1.1** — a large additive patch on top of 0.1.0. The pre-1.0 contract is loose enough to bundle the full surface as a single bump; SemVer-conformant minor/major versioning kicks in at 1.0 once the public API has settled in practice.
 
-- Phase 1 alone — shippable as a patch release.
-- Phase 1 + 2a — shippable; `Resolver` becomes extensible.
-- Phase 1 + 2a + 2b — shippable; compile-time safe production.
-- **Phase 1 + 2a + 2b + 2c** — the target for the next minor release (0.2.0). Compile-time safe production AND tests, no documented pattern as a substitute for a primitive.
+See [`CHANGELOG.md`](../CHANGELOG.md) for the per-version log.
+
+## Releasing
+
+For each release:
+
+1. **Verify suite green** — `swift build && swift test`. Run both example executables: `swift run Example` and `swift run ModularExample`.
+2. **Bump CHANGELOG** — promote the `[Unreleased]` section to the new version with today's date; add fresh empty `[Unreleased]` at the top.
+3. **Tag** — `git tag <version>` (e.g. `git tag 0.3.0`). Do NOT update the `from: "..."` constraint in `README.md`'s install snippet until consumers can actually resolve the tag — bump it on the same commit as the tag is fine.
+4. **Push** — `git push --follow-tags`.
+5. **GitHub release** — create the release on GitHub with the CHANGELOG entry pasted as the release body.
+
+CHANGELOG conventions: [Keep a Changelog](https://keepachangelog.com/) format, [SemVer](https://semver.org/). Minor versions for feature additions, patch for bug fixes only.

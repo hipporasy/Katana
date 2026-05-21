@@ -123,42 +123,37 @@ public struct ContainerMacro: MemberMacro {
     }
 
     private static func makeSnapshotDecl(className: String, typeNames: [String]) -> DeclSyntax {
-        let properties = typeNames.map { typeName in
-            "public let \(propertyName(for: typeName)): \(typeName)"
+        // Direct string construction — multi-line template interpolation
+        // smears literal whitespace inconsistently when sub-lists are joined
+        // with `\n<spaces>`, producing visually broken output. Building the
+        // string by hand gives stable, deterministic indentation.
+        var body = "public struct Snapshot: Resolver {\n"
+        for type in typeNames {
+            body += "    public let \(propertyName(for: type)): \(type)\n"
         }
-        let initParams = typeNames.map { typeName in
-            "\(propertyName(for: typeName)): \(typeName)"
+        body += "\n    public init("
+        body += typeNames.map { "\(propertyName(for: $0)): \($0)" }.joined(separator: ", ")
+        body += ") {\n"
+        for type in typeNames {
+            let p = propertyName(for: type)
+            body += "        self.\(p) = \(p)\n"
         }
-        let initAssigns = typeNames.map { typeName in
-            let p = propertyName(for: typeName)
-            return "self.\(p) = \(p)"
+        body += "    }\n\n"
+        for type in typeNames {
+            body += "    public func resolve(_: \(type).Type) -> \(type) { \(propertyName(for: type)) }\n"
         }
-        let typedResolves = typeNames.map { typeName in
-            "public func resolve(_: \(typeName).Type) -> \(typeName) { \(propertyName(for: typeName)) }"
+        body += "\n    public func resolve<T: Sendable>(_ type: T.Type) -> T {\n"
+        body += "        switch ObjectIdentifier(type) {\n"
+        for type in typeNames {
+            body += "        case ObjectIdentifier(\(type).self):\n"
+            body += "            return \(propertyName(for: type)) as! T\n"
         }
-        let erasedCases = typeNames.map { typeName in
-            "case ObjectIdentifier(\(typeName).self): return \(propertyName(for: typeName)) as! T"
-        }
-
-        return """
-            public struct Snapshot: Resolver {
-                \(raw: properties.joined(separator: "\n    "))
-
-                public init(\(raw: initParams.joined(separator: ", "))) {
-                    \(raw: initAssigns.joined(separator: "\n        "))
-                }
-
-                \(raw: typedResolves.joined(separator: "\n    "))
-
-                public func resolve<T: Sendable>(_ type: T.Type) -> T {
-                    switch ObjectIdentifier(type) {
-                    \(raw: erasedCases.joined(separator: "\n    "))
-                    default:
-                        preconditionFailure("\\(type) is not in \(raw: className).Snapshot. Add it to @Container(...).")
-                    }
-                }
-            }
-            """
+        body += "        default:\n"
+        body += "            preconditionFailure(\"\\(type) is not in \(className).Snapshot. Add it to @Container(...).\")\n"
+        body += "        }\n"
+        body += "    }\n"
+        body += "}"
+        return DeclSyntax(stringLiteral: body)
     }
 }
 

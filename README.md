@@ -2,7 +2,7 @@
 
 A Swift 6 macro-based dependency injection framework. Dagger/Hilt semantics, Swift idioms, minimal runtime.
 
-**[API Documentation →](https://katana.hipporasy.dev)**
+**[API Documentation →](https://katana.hipporasy.dev)** · **[Changelog →](CHANGELOG.md)**
 
 ```swift
 @Injectable
@@ -21,9 +21,10 @@ The `@Injectable` macro inspects the type's primary initializer and synthesizes 
 ## Features
 
 - **`@Injectable`** — annotate a type, the macro generates the container wiring. SwiftSyntax compiler plugin, no codegen step.
-- **`@Container`** — declare your dependency graph in one place. The macro emits typed `resolve(_:)` overloads, so **resolving an unregistered type is a compile error**, not a runtime trap. Refactor-safe by construction.
-- **`@TestContainer`** — test-target peer of `@Container` with override-first ergonomics and a `TestContainerMarker` conformance for project lint. Same compile-time safety.
-- **`@<Graph>.Inject`** — typed SwiftUI property wrapper, generated per graph. One `.katana(snapshot)` install at the root, infinite `@App.Inject var x: T` reads anywhere — the Hilt `hiltViewModel()` equivalent for SwiftUI.
+- **`@Container`** — declare your dependency graph inline in one place. The macro emits typed `resolve(_:)` overloads, so **resolving an unregistered type is a compile error**, not a runtime trap. Refactor-safe by construction.
+- **`@Module` + `@KatanaApp`** — split your dependency graph across files, Hilt-style. A SwiftPM build plugin (`KatanaCodegen`) aggregates `@Module`s at build time and generates the same typed shape as `@Container`. Best for larger apps with feature-team-owned modules. See [`Documentation/modules.md`](Documentation/modules.md).
+- **`@TestContainer` / `@KatanaTestApp`** — test-target peers with override-first ergonomics and a `TestContainerMarker` conformance for project lint. Same compile-time safety on both paths.
+- **`@<Graph>.Inject`** — typed SwiftUI property wrapper, generated per graph. One install at the root, infinite `@App.Inject var x: T` reads anywhere — the Hilt `hiltViewModel()` equivalent for SwiftUI.
 - **Actor-based runtime** — `Container` is an `actor`; thread safety is enforced by Swift's type system, no `@unchecked Sendable` workarounds.
 - **Two scopes** — `.singleton` (cached, `Sendable` required) and `.transient` (`sending`-transferred ownership for non-`Sendable` types).
 - **Swift 6 strict concurrency** — `.swiftLanguageMode(.v6)`, builds clean with zero warnings.
@@ -183,6 +184,36 @@ final class TestApp {}
 
 `@TestContainer` emits the same shape as `@Container` plus post-construction `override(_:with:)` / `override(_:factory:)` methods and a `TestContainerMarker` conformance for project lint ("no test containers outside `Tests/`"). See [`Documentation/mvvm.md`](Documentation/mvvm.md) for the full walkthrough and [`Documentation/multi-container.md`](Documentation/multi-container.md) for multi-graph apps.
 
+## Modular composition — `@Module` + `@KatanaApp`
+
+For larger apps where the type list outgrows a single `@Container(...)` call, split the graph across files using `@Module` and aggregate with `@KatanaApp`. A SwiftPM build plugin (`KatanaCodegen`) scans the target at build time and emits the same typed extension `@Container` would have produced from an inline list:
+
+```swift
+// Modules/ServiceModule.swift
+@Module(Logger.self, AnalyticsClient.self)
+enum ServiceModule {}
+
+// Modules/RepositoryModule.swift
+@Module(TodoRepository.self, UserRepository.self)
+enum RepositoryModule {}
+
+// App.swift
+@KatanaApp(modules: [ServiceModule.self, RepositoryModule.self])
+final class App {}
+```
+
+Enable the plugin per target in your `Package.swift`:
+
+```swift
+.executableTarget(
+    name: "MyApp",
+    dependencies: ["Katana"],
+    plugins: ["KatanaCodegenPlugin"]
+)
+```
+
+After build, `App` has the same typed API as the inline `@Container` form, plus a generated `\.appSnapshot` env key and `.installApp(_:)` view modifier for SwiftUI. Multi-graph apps get one env key per `@KatanaApp` automatically — no manual env-plumbing. See [`Documentation/modules.md`](Documentation/modules.md) for the full guide.
+
 ## Custom Factories
 
 Pass an explicit factory closure when the default macro-generated wiring doesn't fit (e.g., conditional construction, third-party types):
@@ -258,8 +289,11 @@ The package has these SPM targets:
 
 - `KatanaMacros` — the compiler plugin (runs at build time)
 - `Katana` — the public library users import
+- `KatanaCodegen` — executable backing the `KatanaCodegenPlugin` build plugin
+- `KatanaCodegenPlugin` — SwiftPM build-tool plugin powering `@Module` / `@KatanaApp`
 - `KatanaClient` — runtime demo / smoke test
-- `Example` — MVVM walk-through (executable + SwiftUI view + tests)
+- `Example` — MVVM walk-through with inline `@Container`
+- `ModularExample` — same demo, refactored to `@Module` + `@KatanaApp`
 
 Tests live in `KatanaTests` (macro expansion via `assertMacroExpansion`) and `ExampleTests` (Swift Testing suite exercising the example's container).
 

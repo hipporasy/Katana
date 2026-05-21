@@ -69,3 +69,62 @@ public macro Container(_ types: any (Injectable & Sendable).Type...) =
 @attached(extension, conformances: TestContainerMarker)
 public macro TestContainer(_ types: any (Injectable & Sendable).Type...) =
     #externalMacro(module: "KatanaMacros", type: "TestContainerMacro")
+
+/// Groups injectable types into a named module so they can be aggregated as a
+/// unit from `@KatanaApp(modules: [...])`. The macro emits a `static let types`
+/// list and a `KatanaModule` conformance — both useful at runtime for
+/// introspection even before the `KatanaCodegen` build plugin ships.
+///
+/// ```swift
+/// @Module(TodoRepository.self, UserRepository.self)
+/// enum RepositoryModule {}
+///
+/// @Module(Logger.self, NetworkClient.self)
+/// enum ServiceModule {}
+/// ```
+///
+/// Each module-annotated enum gets a synthesised `types` static property:
+///
+/// ```swift
+/// // RepositoryModule.types == [TodoRepository.self, UserRepository.self]
+/// for type in RepositoryModule.types {
+///     print(type)
+/// }
+/// ```
+///
+/// Aggregating modules into a typed container is a Phase 3b feature — see
+/// `Documentation/modules.md`.
+@attached(member, names: named(types))
+@attached(extension, conformances: KatanaModule)
+public macro Module(_ types: any (Injectable & Sendable).Type...) =
+    #externalMacro(module: "KatanaMacros", type: "ModuleMacro")
+
+/// `@KatanaApp(modules: [...])` — marker for the `KatanaCodegen` build plugin.
+/// The plugin reads the listed `@Module`s, aggregates their type lists, and
+/// emits a generated extension on the annotated class with the same shape
+/// `@Container` produces from an inline type list.
+///
+/// ```swift
+/// @KatanaApp(modules: [RepositoryModule.self, ServiceModule.self])
+/// public final class App {}
+/// ```
+///
+/// The plugin must be wired into your `Package.swift`. Without it, this
+/// annotation produces an empty class. See `Documentation/modules.md`.
+@attached(member, names: arbitrary)
+public macro KatanaApp(modules: [any KatanaModule.Type]) =
+    #externalMacro(module: "KatanaMacros", type: "KatanaAppMacro")
+
+/// `@KatanaTestApp(of: App.self)` — marker for the `KatanaCodegen` build plugin.
+/// Generates a test peer of a `@KatanaApp`-built graph with override-first
+/// ergonomics and a `TestContainerMarker` conformance.
+///
+/// ```swift
+/// @KatanaTestApp(of: App.self)
+/// public final class TestApp {}
+/// ```
+///
+/// Requires the `KatanaCodegen` plugin — see `Documentation/modules.md`.
+@attached(member, names: arbitrary)
+public macro KatanaTestApp(of app: Any.Type) =
+    #externalMacro(module: "KatanaMacros", type: "KatanaTestAppMacro")

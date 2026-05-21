@@ -148,5 +148,8 @@ struct KatanaPlugin: CompilerPlugin {
         InjectableMacro.self,
         ContainerMacro.self,
         TestContainerMacro.self,
+        ModuleMacro.self,
+        KatanaAppMacro.self,
+        KatanaTestAppMacro.self,
     ]
 }

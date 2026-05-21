@@ -9,6 +9,8 @@ let package = Package(
         .library(name: "Katana", targets: ["Katana"]),
         .executable(name: "KatanaClient", targets: ["KatanaClient"]),
         .executable(name: "Example", targets: ["Example"]),
+        .executable(name: "ModularExample", targets: ["ModularExample"]),
+        .plugin(name: "KatanaCodegenPlugin", targets: ["KatanaCodegenPlugin"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-syntax.git", from: "600.0.0"),
@@ -50,6 +52,41 @@ let package = Package(
                 .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
             ]
         ),
+        // MARK: - KatanaCodegen (build plugin's executable + core library)
+        .target(
+            name: "KatanaCodegenCore",
+            dependencies: [
+                .product(name: "SwiftSyntax", package: "swift-syntax"),
+                .product(name: "SwiftParser", package: "swift-syntax"),
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
+            ]
+        ),
+        .executableTarget(
+            name: "KatanaCodegen",
+            dependencies: ["KatanaCodegenCore"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
+            ]
+        ),
+        .plugin(
+            name: "KatanaCodegenPlugin",
+            capability: .buildTool(),
+            dependencies: ["KatanaCodegen"]
+        ),
+        // MARK: - ModularExample (consumer of the plugin)
+        .executableTarget(
+            name: "ModularExample",
+            dependencies: ["Katana"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
+            ],
+            plugins: ["KatanaCodegenPlugin"]
+        ),
         .testTarget(
             name: "KatanaTests",
             dependencies: [
@@ -64,6 +101,14 @@ let package = Package(
         .testTarget(
             name: "ExampleTests",
             dependencies: ["Example", "Katana"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
+            ]
+        ),
+        .testTarget(
+            name: "KatanaCodegenTests",
+            dependencies: ["KatanaCodegenCore"],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
                 .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
