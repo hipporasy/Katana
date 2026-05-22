@@ -36,51 +36,91 @@ final class ScannerTests: XCTestCase {
         @Module
         enum Empty {}
         """, path: "x.swift")
-        // Attribute exists but no args — Module is still recorded with empty type list.
         XCTAssertEqual(scanner.modules["Empty"]?.types, [])
     }
 
-    // MARK: - @KatanaApp
+    // MARK: - @Container
 
-    func testExtractsAppDecl() {
+    func testExtractsContainerDecl() {
         let scanner = Scanner()
         scanner.scan(source: """
-        @KatanaApp(modules: [ServiceModule.self, RepositoryModule.self])
+        @Container(modules: [ServiceModule.self, RepositoryModule.self])
         public final class App {}
         """, path: "App.swift")
 
-        XCTAssertEqual(scanner.apps.count, 1)
-        let app = scanner.apps[0]
-        XCTAssertEqual(app.name, "App")
-        XCTAssertEqual(app.modules, ["ServiceModule", "RepositoryModule"])
-        XCTAssertEqual(app.accessLevel, "public")
-        XCTAssertNil(app.availability)
+        XCTAssertEqual(scanner.containers.count, 1)
+        let container = scanner.containers[0]
+        XCTAssertEqual(container.name, "App")
+        XCTAssertEqual(container.scope, "default")     // omitted → default
+        XCTAssertEqual(container.modules, ["ServiceModule", "RepositoryModule"])
+        XCTAssertEqual(container.accessLevel, "public")
+        XCTAssertNil(container.availability)
+        XCTAssertFalse(container.isTest)
+    }
+
+    func testExtractsContainerScope() {
+        let scanner = Scanner()
+        scanner.scan(source: """
+        @Container(scope: .checkout, modules: [CheckoutModule.self])
+        final class CheckoutGraph {}
+        """, path: "Checkout.swift")
+
+        XCTAssertEqual(scanner.containers.first?.scope, "checkout")
+        XCTAssertEqual(scanner.containers.first?.name, "CheckoutGraph")
     }
 
     func testCapturesAvailability() {
         let scanner = Scanner()
         scanner.scan(source: """
         @available(macOS 14, iOS 17, *)
-        @KatanaApp(modules: [ServiceModule.self])
+        @Container(modules: [ServiceModule.self])
         final class App {}
         """, path: "App.swift")
 
-        XCTAssertEqual(scanner.apps.first?.availability, "@available(macOS 14, iOS 17, *)")
-        XCTAssertEqual(scanner.apps.first?.accessLevel, "")
+        XCTAssertEqual(scanner.containers.first?.availability, "@available(macOS 14, iOS 17, *)")
+        XCTAssertEqual(scanner.containers.first?.accessLevel, "")
     }
 
-    // MARK: - @KatanaTestApp
+    // MARK: - @TestContainer
 
-    func testExtractsTestAppDecl() {
+    func testExtractsTestContainerDecl() {
         let scanner = Scanner()
         scanner.scan(source: """
-        @KatanaTestApp(of: App.self)
+        @TestContainer(modules: [ServiceModule.self])
         final class TestApp {}
         """, path: "TestApp.swift")
 
-        XCTAssertEqual(scanner.testApps.count, 1)
-        XCTAssertEqual(scanner.testApps[0].name, "TestApp")
-        XCTAssertEqual(scanner.testApps[0].productionApp, "App")
+        XCTAssertEqual(scanner.containers.count, 1)
+        let container = scanner.containers[0]
+        XCTAssertEqual(container.name, "TestApp")
+        XCTAssertTrue(container.isTest)
+    }
+
+    // MARK: - @Scope
+
+    func testExtractsScopeRegistry() {
+        let scanner = Scanner()
+        scanner.scan(source: """
+        @Scope
+        enum AppScope {
+            case checkout
+            case payment
+        }
+        """, path: "Scopes.swift")
+
+        XCTAssertEqual(scanner.scopes.count, 1)
+        XCTAssertEqual(scanner.scopes[0].name, "AppScope")
+        XCTAssertEqual(scanner.scopes[0].cases, ["checkout", "payment"])
+    }
+
+    func testEmptyScopeRegistry() {
+        let scanner = Scanner()
+        scanner.scan(source: """
+        @Scope
+        enum AppScope {}
+        """, path: "Scopes.swift")
+
+        XCTAssertEqual(scanner.scopes.first?.cases, [])
     }
 
     // MARK: - Multi-file scan
@@ -89,10 +129,13 @@ final class ScannerTests: XCTestCase {
         let scanner = Scanner()
         scanner.scan(source: "@Module(Logger.self) enum ServiceModule {}", path: "Service.swift")
         scanner.scan(source: "@Module(TodoRepository.self) enum RepoModule {}", path: "Repo.swift")
-        scanner.scan(source: "@KatanaApp(modules: [ServiceModule.self, RepoModule.self]) final class App {}", path: "App.swift")
+        scanner.scan(source: "@Container(modules: [ServiceModule.self, RepoModule.self]) final class App {}", path: "App.swift")
+        scanner.scan(source: "@Scope enum AppScope { case checkout }", path: "Scopes.swift")
 
         XCTAssertEqual(scanner.modules.count, 2)
-        XCTAssertEqual(scanner.apps.count, 1)
-        XCTAssertEqual(scanner.apps[0].modules, ["ServiceModule", "RepoModule"])
+        XCTAssertEqual(scanner.containers.count, 1)
+        XCTAssertEqual(scanner.containers[0].modules, ["ServiceModule", "RepoModule"])
+        XCTAssertEqual(scanner.scopes.count, 1)
+        XCTAssertEqual(scanner.scopes[0].cases, ["checkout"])
     }
 }

@@ -4,7 +4,52 @@ All notable changes to Katana are documented here. The format follows [Keep a Ch
 
 ## [Unreleased]
 
-Nothing yet.
+### Breaking changes — Hilt-style overhaul
+
+The container surface collapses into one shape, and SwiftUI access becomes keypath-based.
+
+- **Removed `@KatanaApp` and `@KatanaTestApp`.** Their roles fold into the reworked `@Container` and `@TestContainer`.
+- **`@Container` is now modules-only and plugin-driven.** The inline `@Container(T1.self, T2.self, ...)` form is gone. Use `@Container(modules: [SomeModule.self, OtherModule.self])`. The `KatanaCodegenPlugin` is **mandatory** on every target that declares a container.
+- **`@TestContainer` mirrors the change.** `@TestContainer(modules: [...])` replaces the inline form.
+- **Per-graph nested `Inject` wrappers removed.** `@App.Inject var x: T` no longer exists. SwiftUI views use the framework-level **`@Inject`**:
+  - `@Inject var x: T` — bare form, reads the `.default`-scoped graph. Plugin emits the matching `init()` overload only when exactly one container binds to `.default`.
+  - `@Inject(\.checkout) var x: T` — explicit form, reads a named scope.
+- **`@Scope` macro (new).** Declares custom container scopes:
+  ```swift
+  @Scope enum AppScope {
+      case checkout
+      case payment
+  }
+
+  @Container(scope: .checkout, modules: [CheckoutModule.self])
+  final class CheckoutGraph {}
+  ```
+- **`ContainerScope` type (new).** Hashable struct with `.default` built in; `@Scope` cases peer-emit `static let <case>` properties.
+- **Scope-uniqueness validation.** Two `@Container`s at the same scope (per target) is a plugin build error.
+- **User imports replayed.** The scanner records `import` and `@testable import` lines and the emitter writes them at the top of `KatanaGenerated.swift` — fixes test targets that reach internal production types.
+- **`\.katanaResolver` env key and old `.katana(any Resolver)` modifier removed.** Each `@Container` emits its own typed env slot and `View.katana(_ snapshot: <Graph>.Snapshot)` overload.
+
+### Migration
+
+| Before                                                                | After                                                                                  |
+|-----------------------------------------------------------------------|----------------------------------------------------------------------------------------|
+| `@Container(Logger.self, FooRepo.self)`                               | `@Module(Logger.self, FooRepo.self) enum AppModule {}` + `@Container(modules: [AppModule.self])` |
+| `@KatanaApp(modules: [...])`                                          | `@Container(modules: [...])`                                                           |
+| `@KatanaTestApp(of: App.self)`                                        | `@TestContainer(modules: [...])` (re-declare modules in the test target)                |
+| `@App.Inject var vm: VM`                                              | `@Inject var vm: VM` (default) or `@Inject(\.scope) var vm: VM`                         |
+| `.katana(snapshot)` (with `any Resolver`)                             | `.katana(snapshot)` (overload picked by `<Graph>.Snapshot` type)                        |
+| `.install<App>(snapshot)`                                              | `.katana(snapshot)` (the install modifier now overloads on snapshot type)               |
+| Multi-graph: manual `EnvironmentValues` extension + custom wrapper    | `@Scope enum AppScope { case checkout }` + `@Container(scope: .checkout, …)` + `@Inject(\.checkout)` |
+
+Every target that declares `@Container` / `@TestContainer` / `@Scope` must now enable the build plugin in `Package.swift`:
+
+```swift
+.executableTarget(
+    name: "MyApp",
+    dependencies: ["Katana"],
+    plugins: ["KatanaCodegenPlugin"]
+)
+```
 
 ## [0.1.1]
 

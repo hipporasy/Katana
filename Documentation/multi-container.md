@@ -1,75 +1,78 @@
 # Multiple Containers
 
-Most apps need one container. Some don't. This guide covers the multi-container patterns Katana supports today, the trade-offs, and where the seams are if you need to push further.
+Most apps need one container. Some don't. This guide covers the multi-container patterns Katana supports, the trade-offs, and where the seams are if you need to push further.
 
 ## When you actually need more than one
 
 - **Feature-scoped graphs.** A `Checkout` flow has its own short-lived dependencies (cart, payment session) that shouldn't outlive the flow. Compose them in a `Checkout` container, install it only inside the checkout subtree, tear down on exit.
 - **Plugin / module boundaries.** A host app + plugin SDK might each ship their own typed container.
-- **Test surface.** Already covered — `@TestContainer` is the test-target peer of `@Container`. Not really "multi-container" in the runtime sense.
+- **Test surface.** `@TestContainer` is the test-target peer of `@Container`. Not really "multi-container" in the runtime sense.
 
-If your reason is "I want different lifetimes," check first whether `.transient` scope solves it. Container multiplicity should be the answer to "different *scope of validity*," not "different *creation policy*."
+If your reason is "I want different lifetimes," check first whether `.transient` (the injectable scope) solves it. Container multiplicity should be the answer to "different *scope of validity*," not "different *creation policy*."
 
 ## The shape of a multi-container app
 
-Each graph is its own `@Container`-annotated class:
+Custom scopes are declared once with `@Scope`; each `@Container` binds to a scope.
 
 ```swift
-@Container(Logger.self, Network.self, AuthSession.self)
-final class App {}
+@Scope
+enum AppScope {
+    case checkout
+    case account
+}
 
-@Container(CartStore.self, PaymentClient.self, CheckoutViewModel.self)
+@Container(modules: [ServiceModule.self, AuthModule.self])
+final class App {}                                          // implicit .default
+
+@Container(scope: .checkout, modules: [CheckoutModule.self])
 final class Checkout {}
+
+@Container(scope: .account, modules: [AccountModule.self])
+final class Account {}
 ```
 
-The macro generates **independent** types per graph: `App.Snapshot`, `App.Inject`, `Checkout.Snapshot`, `Checkout.Inject`. There's no cross-graph leakage at the type level.
+Each graph is its own typed class. The build plugin emits:
 
-## Today's environment plumbing (manual)
+- `App.Snapshot`, `Checkout.Snapshot`, `Account.Snapshot` — independent typed resolvers
+- `\.katanaDefault`, `\.checkout`, `\.account` — independent `EnvironmentValues` slots
+- Three `View.katana(_:)` overloads, picked by snapshot type
+- `Inject.init()` only for `App` (the `.default` graph) — bare `@Inject` is reserved for it
 
-In v1, the `@Container` macro emits a single typed `Inject` that reads `\.katanaResolver` from the environment and downcasts to `<ClassName>.Snapshot`. For a single-graph app, this is invisible — you install the snapshot with `.katana(snapshot)` and `@App.Inject` works.
+If two `@Container`s bind to the same scope, the plugin emits a build error pointing at both.
 
-For **multiple snapshots in flight at once**, the shared key is insufficient: only one snapshot fits per env key. You add per-graph keys manually:
+## SwiftUI plumbing — generated, not manual
+
+For every `@Container`, the plugin generates:
 
 ```swift
-// One-time setup per additional graph:
+// Plugin-emitted for `Checkout`:
+private struct __Katana_Checkout_SnapshotKey: EnvironmentKey {
+    static let defaultValue: (any Resolver)? = nil
+}
+
 extension EnvironmentValues {
-    @Entry var checkoutSnapshot: Checkout.Snapshot?
+    var checkout: (any Resolver)? { ... }
 }
-```
 
-And a per-graph view modifier + property wrapper that reads the dedicated key:
-
-```swift
 extension View {
-    func checkout(_ snapshot: Checkout.Snapshot) -> some View {
-        environment(\.checkoutSnapshot, snapshot)
-    }
-}
-
-@propertyWrapper
-struct CheckoutInject<Value: Sendable>: DynamicProperty {
-    @Environment(\.checkoutSnapshot) private var snapshot
-    var wrappedValue: Value {
-        guard let snapshot else {
-            preconditionFailure("Checkout.Snapshot not installed in this subtree.")
-        }
-        return snapshot.resolve(Value.self)
+    func katana(_ snapshot: Checkout.Snapshot) -> some View {
+        environment(\.checkout, snapshot)
     }
 }
 ```
 
-Use the primary graph as the default (`@App.Inject`) and the additional graph through the custom wrapper:
+You install with `.katana(snapshot)` regardless of which graph — the overload is picked by snapshot type. Reading happens with `@Inject(\.<scope>)`:
 
 ```swift
 struct PayButton: View {
-    @App.Inject var network: Network              // primary graph (shared env key)
-    @CheckoutInject var vm: CheckoutViewModel     // feature graph (custom env key)
+    @Inject var network: Network                            // .default graph
+    @Inject(\.checkout) var vm: CheckoutViewModel           // .checkout graph
 
     var body: some View { ... }
 }
 ```
 
-This works today. The boilerplate is one `extension EnvironmentValues` and one custom property wrapper per additional graph. A future macro enhancement could generate both, but at the cost of additional macro surface area — see "Future work" below.
+Typing `@Inject(\.chekcout)` (with a typo) is a compile error — `ContainerScope.chekcout` doesn't exist, and the keypath can't resolve.
 
 ## Install pattern
 
@@ -95,12 +98,12 @@ A feature subtree adds its graph only where it's valid:
 
 ```swift
 struct CheckoutFlow: View {
-    @App.Inject var session: AuthSession
+    @Inject var session: AuthSession
     @State private var checkout: Checkout.Snapshot?
 
     var body: some View {
         if let checkout {
-            CheckoutRootView().checkout(checkout)
+            CheckoutRootView().katana(checkout)
         } else {
             ProgressView().task {
                 // Pass the session from App into Checkout's graph via the closure init.
@@ -117,7 +120,7 @@ When `CheckoutFlow` disappears, `checkout` deallocates — the graph's lifetime 
 
 ## Passing dependencies between graphs
 
-The proper seam is the **closure init**, not double-registration. If `Checkout` needs the `App` graph's `AuthSession`, the parent view resolves it from `App.Snapshot` and overrides the registration in `Checkout`:
+The seam is the **closure init**, not double-registration. If `Checkout` needs the `App` graph's `AuthSession`, the parent view resolves it from `App.Snapshot` and overrides the registration in `Checkout`:
 
 ```swift
 let app = await App()
@@ -128,32 +131,42 @@ let checkout = await Checkout { c in
 }
 ```
 
-This is type-checked: `App` must register `AuthSession`, `Checkout` must register `AuthSession` (so the override matches), and the instance flows from one to the other explicitly.
+This is type-checked: `App` must register `AuthSession` (via some `@Module`), `Checkout` must register `AuthSession` (so the override matches), and the instance flows from one to the other explicitly.
 
 ## Compile-time safety still applies
 
 Adding a second graph doesn't soften the compile-time guarantees:
 
-- `@App.Inject var vm: CheckoutViewModel` → **compile error** (not in `App`'s type list).
-- `@CheckoutInject var session: AuthSession` → only works if `AuthSession` is in `Checkout`'s type list.
+- `@Inject var vm: CheckoutViewModel` (bare → `.default`) → **compile error** if `CheckoutViewModel` isn't in `App.Snapshot`.
+- `@Inject(\.checkout) var session: AuthSession` → works only if `Checkout`'s modules register `AuthSession`.
 
-The graph annotation is the safety contract. Refactor a dep into the wrong graph and the build catches you.
+The `@Module` set per `@Container` is the safety contract. Refactor a dep into the wrong graph and the build catches you.
 
 ## Anti-patterns
 
 - **Don't** install the same snapshot at two unrelated scopes — you'll have two independent graphs of "the same" services with separate singleton state.
 - **Don't** double-register a singleton in two graphs and hope they share — they won't. Pick one graph as the owner, pass the resolved instance into the other via override.
-- **Don't** use bare `@Inject` when more than one snapshot is in scope. The downcast targets *one* type; the wrong snapshot triggers a runtime trap with an unhelpful message.
+- **Don't** mix `@Inject` (no keypath) and `@Inject(\.<scope>)` arbitrarily. Use bare `@Inject` only for dependencies in the `.default` graph; reach for the explicit form when crossing graph boundaries.
 
-## Avoiding the boilerplate with `@KatanaApp`
+## Notes on test targets
 
-The manual env-key plumbing above is only needed when you stick with plain `@Container`. The **`@KatanaApp`** path ([`modules.md`](modules.md)) generates a per-graph env key, view modifier, and `Inject` wrapper for every app it produces — so multi-graph apps work without any of the manual setup in this guide.
+Test targets that use `@testable import` to reach production types must re-declare their own `@Module` enums in the test target, because the build plugin scans per target. The scanner replays imports in the generated file, so `@testable import Example` in your test file propagates to `KatanaGenerated.swift` automatically.
 
-If you have more than one graph, prefer `@KatanaApp` over `@Container`. The plugin pays for itself the moment you have to write a second graph's env key by hand.
+To avoid `EnvironmentValues.katanaDefault` colliding between the production target's emission and the test target's emission, put `@TestContainer` on a custom scope:
+
+```swift
+// In Tests/ExampleTests/
+@Scope enum ExampleTestsScope { case test }
+
+@TestContainer(scope: .test, modules: [TestAppModule.self])
+final class TestApp {}
+```
+
+Tests then call `app.resolve(...)` / `app.override(...)` directly — they don't go through SwiftUI's environment.
 
 ## See also
 
 - [`mvvm.md`](mvvm.md) — single-graph walkthrough with the example project
-- [`roadmap.md`](roadmap.md) — phased plan including future multi-graph improvements
 - [`design.md`](design.md) — DI architecture, macro contract, scope rules
+- [`modules.md`](modules.md) — `@Module` composition and the codegen plugin
 - [`swift6.md`](swift6.md) — Swift 6 concurrency rules

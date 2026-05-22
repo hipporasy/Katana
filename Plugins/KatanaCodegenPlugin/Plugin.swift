@@ -2,8 +2,9 @@ import Foundation
 import PackagePlugin
 
 /// SwiftPM build-tool plugin that runs `KatanaCodegen` over the target's Swift
-/// sources to generate typed `@KatanaApp` / `@KatanaTestApp` extensions before
-/// compilation.
+/// sources to generate typed `@Container` / `@TestContainer` extensions, the
+/// per-scope `EnvironmentValues` slots, install modifiers, and the bare
+/// `@Inject` default-init overload before compilation.
 @main
 struct KatanaCodegenPlugin: BuildToolPlugin {
     func createBuildCommands(

@@ -50,7 +50,8 @@ let package = Package(
             swiftSettings: [
                 .swiftLanguageMode(.v6),
                 .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
-            ]
+            ],
+            plugins: ["KatanaCodegenPlugin"]
         ),
         // MARK: - KatanaCodegen (build plugin's executable + core library)
         .target(
@@ -104,7 +105,8 @@ let package = Package(
             swiftSettings: [
                 .swiftLanguageMode(.v6),
                 .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
-            ]
+            ],
+            plugins: ["KatanaCodegenPlugin"]
         ),
         .testTarget(
             name: "KatanaCodegenTests",

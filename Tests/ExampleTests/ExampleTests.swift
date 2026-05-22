@@ -6,16 +6,29 @@ import Katana
 import SwiftUI
 #endif
 
-/// Test peer of `App`. Same type list — `@TestContainer` adds post-construction
-/// `override(_:with:)` and `override(_:factory:)` methods plus a
-/// `TestContainerMarker` conformance. Compile-time safety on `resolve` is
-/// identical to `App`'s.
+// MARK: - Test graph
+
+// The KatanaCodegen plugin scans per target, so the test target re-declares
+// its own modules referencing Example's internal types via `@testable import`.
+// Aggregated into a single test module for brevity — production code would
+// typically mirror the production module shape.
 @available(macOS 14, iOS 17, *)
-@TestContainer(
-    Logger.self,
-    TodoRepository.self,
-    TodoListViewModel.self
-)
+@Module(Logger.self, TodoRepository.self, TodoListViewModel.self)
+enum TestAppModule {}
+
+/// Custom scope keeps the test container off `.default`, which avoids a
+/// collision with `Example.App`'s `\.katanaDefault` extension that flows in
+/// via `@testable import`.
+@Scope
+enum ExampleTestsScope {
+    case test
+}
+
+/// Test peer of `App`. `@TestContainer` emits the same shape as `@Container`
+/// plus post-construction `override(_:with:)` / `override(_:factory:)` and
+/// `TestContainerMarker` conformance.
+@available(macOS 14, iOS 17, *)
+@TestContainer(scope: .test, modules: [TestAppModule.self])
 final class TestApp {}
 
 @MainActor
@@ -86,7 +99,7 @@ struct ExampleTests {
         #expect(viewModel.todos.isEmpty)
     }
 
-    // MARK: - Snapshot (typed sync resolver for SwiftUI @App.Inject)
+    // MARK: - Snapshot (typed sync resolver for SwiftUI @Inject)
 
     @Test func snapshotReturnsTheSameInstanceAsContainer() async throws {
         guard #available(macOS 14, iOS 17, *) else { return }

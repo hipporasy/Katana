@@ -10,22 +10,27 @@ final class AuthService: Sendable {
     init(network: NetworkService, logger: Logger) { … }
 }
 
-let container = Container()
-await container.register(AuthService.self)
+@Module(AuthService.self, NetworkService.self, Logger.self)
+enum AuthModule {}
 
-let auth = await container.resolve(AuthService.self)
+@Container(modules: [AuthModule.self])
+final class App {}
+
+let app = await App()
+let auth = await app.resolve(AuthService.self)        // compile-checked
 ```
 
-The `@Injectable` macro inspects the type's primary initializer and synthesizes the wiring; you never write factory boilerplate.
+The macros generate every wiring detail. The `KatanaCodegen` build plugin aggregates `@Module`s, validates scope uniqueness, and emits typed `resolve(_:)` overloads, the typed `Snapshot`, the SwiftUI install modifier, and the bare `@Inject` default-init — all before compilation.
 
 ## Features
 
-- **`@Injectable`** — annotate a type, the macro generates the container wiring. SwiftSyntax compiler plugin, no codegen step.
-- **`@Container`** — declare your dependency graph inline in one place. The macro emits typed `resolve(_:)` overloads, so **resolving an unregistered type is a compile error**, not a runtime trap. Refactor-safe by construction.
-- **`@Module` + `@KatanaApp`** — split your dependency graph across files, Hilt-style. A SwiftPM build plugin (`KatanaCodegen`) aggregates `@Module`s at build time and generates the same typed shape as `@Container`. Best for larger apps with feature-team-owned modules. See [`Documentation/modules.md`](Documentation/modules.md).
-- **`@TestContainer` / `@KatanaTestApp`** — test-target peers with override-first ergonomics and a `TestContainerMarker` conformance for project lint. Same compile-time safety on both paths.
-- **`@<Graph>.Inject`** — typed SwiftUI property wrapper, generated per graph. One install at the root, infinite `@App.Inject var x: T` reads anywhere — the Hilt `hiltViewModel()` equivalent for SwiftUI.
-- **Actor-based runtime** — `Container` is an `actor`; thread safety is enforced by Swift's type system, no `@unchecked Sendable` workarounds.
+- **`@Injectable`** — annotate a type, the macro generates the container wiring. Compile-time only, no codegen step.
+- **`@Module(T1.self, ...)`** — groups injectable types so they can be aggregated by name from any `@Container`.
+- **`@Container(modules: [...])`** — declares a dependency graph by referencing one or more `@Module`s. The `KatanaCodegen` build plugin emits typed `resolve(_:)` overloads, the typed `Snapshot`, the install modifier, and the bare `@Inject` initializer for the `.default` scope.
+- **`@TestContainer(modules: [...])`** — test-target peer with override-first ergonomics and `TestContainerMarker` conformance.
+- **`@Scope`** — declares a registry of custom container scopes. Each enum case becomes `ContainerScope.<case>` for use in `@Container(scope: .X, …)` and `@Inject(\.X)`.
+- **`@Inject` property wrapper** — bare form `@Inject var x: T` works in single-container targets; explicit form `@Inject(\.checkout) var x: T` targets a named scope. Type-safe via key paths; typos are compile errors.
+- **Actor-based runtime** — `Container` is an `actor`; thread safety enforced by Swift's type system, no `@unchecked Sendable` workarounds.
 - **Two scopes** — `.singleton` (cached, `Sendable` required) and `.transient` (`sending`-transferred ownership for non-`Sendable` types).
 - **Swift 6 strict concurrency** — `.swiftLanguageMode(.v6)`, builds clean with zero warnings.
 - **`@Observable` / `@MainActor` friendly** — both are implicitly `Sendable`, so they slot in as singletons with no extra work.
@@ -43,18 +48,24 @@ Add to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/hipporasy/Katana.git", from: "0.1.0"),
+    .package(url: "https://github.com/hipporasy/Katana.git", from: "0.2.0"),
 ],
 targets: [
-    .target(name: "YourApp", dependencies: ["Katana"]),
+    .target(
+        name: "YourApp",
+        dependencies: ["Katana"],
+        plugins: ["KatanaCodegenPlugin"]   // ← required on every target using @Container
+    ),
 ]
 ```
 
 Then `import Katana`.
 
+> The build plugin is mandatory. `@Container` only emits storage stubs at macro-expansion time; the typed API, the `EnvironmentValues` slot, and the install modifier are emitted by the plugin before compilation.
+
 ## Quick Start
 
-Annotate types you want to inject:
+Annotate the types you want to inject:
 
 ```swift
 import Katana
@@ -82,15 +93,18 @@ final class AuthService: Sendable {
 }
 ```
 
-Declare the graph once with `@Container`. Resolves are compile-checked against the type list:
+Group them into `@Module`s and aggregate into a `@Container`:
 
 ```swift
-@Container(Logger.self, NetworkClient.self, AuthService.self)
+@Module(Logger.self, NetworkClient.self, AuthService.self)
+enum AuthModule {}
+
+@Container(modules: [AuthModule.self])
 final class App {}
 
 let app = await App()
 let auth = await app.resolve(AuthService.self)        // OK
-// let bad = await app.resolve(URLSession.self)        // ❌ compile error
+// let bad = await app.resolve(URLSession.self)         // compile error
 ```
 
 For ad-hoc or dynamic scenarios the bare `Container` actor still works:
@@ -105,7 +119,9 @@ let auth = await container.resolve(AuthService.self)
 
 Both `register` and `resolve` are `async` because `Container` is an actor — no escape hatches.
 
-## Scopes
+## Scopes (injectable scope)
+
+`@Injectable` controls how the container caches an instance — separate concept from `@Container`'s graph scope (see below).
 
 ### Singleton (default)
 
@@ -115,9 +131,9 @@ The container caches the instance and returns the same reference on every resolv
 @Injectable                        // singleton by default
 @Injectable(scope: .singleton)     // explicit
 
-final class NetworkService: Sendable { … }    // ✅
-@Observable final class AppState { … }        // ✅ implicitly Sendable
-@MainActor final class ViewModel { … }        // ✅ implicitly Sendable
+final class NetworkService: Sendable { … }
+@Observable final class AppState { … }        // implicitly Sendable
+@MainActor final class ViewModel { … }        // implicitly Sendable
 ```
 
 ### Transient
@@ -126,15 +142,15 @@ Each resolve creates a new instance. The container transfers ownership to the ca
 
 ```swift
 @Injectable(scope: .transient)
-final class RequestContext { … }  // ✅ non-Sendable is fine
+final class RequestContext { … }  // non-Sendable is fine
 ```
 
-## SwiftUI integration — `@App.Inject`
+## SwiftUI integration — `@Inject`
 
-For SwiftUI apps, declare your graph with `@Container`, snapshot it once at launch, install with one `.katana(...)` call, and let every view read dependencies with the macro-generated typed `@App.Inject`:
+`@Container` emits a `View.katana(_:)` install modifier and an `EnvironmentValues` slot per graph. Bare `@Inject var x: T` reads the default graph; `@Inject(\.<scope>)` selects a named one.
 
 ```swift
-@Container(Logger.self, TodoRepository.self, TodoListViewModel.self)
+@Container(modules: [AppModule.self])
 final class App {}
 
 @main
@@ -143,7 +159,7 @@ struct MyApp: SwiftUI.App {
     var body: some Scene {
         WindowGroup {
             if let snapshot {
-                RootView().katana(snapshot)
+                RootView().katana(snapshot)      // overload picked by snapshot type
             } else {
                 ProgressView().task { snapshot = await App().snapshot() }
             }
@@ -152,19 +168,47 @@ struct MyApp: SwiftUI.App {
 }
 
 struct ContentView: View {
-    @App.Inject var viewModel: TodoListViewModel   // compile-checked
+    @Inject var viewModel: TodoListViewModel    // bare — default scope
     var body: some View { Text("\(viewModel.todos.count)") }
 }
 ```
 
-`App.snapshot()` eagerly resolves every registered singleton into the typed `App.Snapshot`. `@App.Inject` reads the snapshot from the environment and calls the typed `resolve(_:)` overload — resolving an unregistered type is a build error, not a runtime trap. **One install at the root, infinite reads, zero per-view-model wiring.**
+`App.snapshot()` eagerly resolves every registered singleton into a typed `App.Snapshot`. The plugin emits `Inject.init()` reading from `\.katanaDefault`, so SwiftUI views never touch the container directly. **One install at the root, infinite reads, zero per-view-model wiring.**
+
+## Multiple graphs — `@Scope` + custom scopes
+
+Declare additional scopes once; assign each to a `@Container`. `@Inject(\.<scope>)` reads from the matching graph.
+
+```swift
+@Scope
+enum AppScope {
+    case checkout
+    case account
+}
+
+@Container(modules: [AppModule.self])
+final class App {}                                         // .default → bare @Inject
+
+@Container(scope: .checkout, modules: [CheckoutModule.self])
+final class CheckoutGraph {}
+
+struct CheckoutView: View {
+    @Inject var session: AuthSession                       // from App
+    @Inject(\.checkout) var vm: CheckoutViewModel          // from CheckoutGraph
+}
+```
+
+The build plugin validates scope uniqueness across the target — two `@Container`s at the same scope is a build error pointing at both declarations.
 
 ## Testing — `@TestContainer`
 
 Production-side compile-time safety, override-first ergonomics for tests:
 
 ```swift
-@TestContainer(Logger.self, TodoRepository.self, TodoListViewModel.self)
+@Module(Logger.self, TodoRepository.self, TodoListViewModel.self)
+enum TestAppModule {}
+
+@TestContainer(modules: [TestAppModule.self])
 final class TestApp {}
 
 @Test func togglesCompletion() async {
@@ -183,36 +227,6 @@ final class TestApp {}
 ```
 
 `@TestContainer` emits the same shape as `@Container` plus post-construction `override(_:with:)` / `override(_:factory:)` methods and a `TestContainerMarker` conformance for project lint ("no test containers outside `Tests/`"). See [`Documentation/mvvm.md`](Documentation/mvvm.md) for the full walkthrough and [`Documentation/multi-container.md`](Documentation/multi-container.md) for multi-graph apps.
-
-## Modular composition — `@Module` + `@KatanaApp`
-
-For larger apps where the type list outgrows a single `@Container(...)` call, split the graph across files using `@Module` and aggregate with `@KatanaApp`. A SwiftPM build plugin (`KatanaCodegen`) scans the target at build time and emits the same typed extension `@Container` would have produced from an inline list:
-
-```swift
-// Modules/ServiceModule.swift
-@Module(Logger.self, AnalyticsClient.self)
-enum ServiceModule {}
-
-// Modules/RepositoryModule.swift
-@Module(TodoRepository.self, UserRepository.self)
-enum RepositoryModule {}
-
-// App.swift
-@KatanaApp(modules: [ServiceModule.self, RepositoryModule.self])
-final class App {}
-```
-
-Enable the plugin per target in your `Package.swift`:
-
-```swift
-.executableTarget(
-    name: "MyApp",
-    dependencies: ["Katana"],
-    plugins: ["KatanaCodegenPlugin"]
-)
-```
-
-After build, `App` has the same typed API as the inline `@Container` form, plus a generated `\.appSnapshot` env key and `.installApp(_:)` view modifier for SwiftUI. Multi-graph apps get one env key per `@KatanaApp` automatically — no manual env-plumbing. See [`Documentation/modules.md`](Documentation/modules.md) for the full guide.
 
 ## Custom Factories
 
@@ -240,6 +254,8 @@ extension URLSession: Injectable {
 
 ## Macro Behavior
 
+### `@Injectable`
+
 | Input                                      | Output                                                                          |
 |--------------------------------------------|---------------------------------------------------------------------------------|
 | `@Injectable` on type with no `init` args  | `resolve` returns `Self()`                                                      |
@@ -249,7 +265,24 @@ extension URLSession: Injectable {
 | `@Injectable` on `protocol` / `enum` / extension | Compile-time error                                                          |
 | `init` with variadic or `inout` parameters | Compile-time error                                                              |
 
-Unlabeled parameters (`init(_ value: Foo)`), generic dependency types (`Store<User>`), and parameters with default values are all supported. Default values are ignored — every `init` parameter is resolved through the container.
+### `@Container`, `@TestContainer`
+
+| Input                                                  | Output                                                                          |
+|--------------------------------------------------------|---------------------------------------------------------------------------------|
+| `@Container(modules: [M.self, …])` on `final class App` | Macro: storage stub + designated init. Plugin emits async `init(_ customize:)`, typed `resolve(_:)` overloads, nested `Snapshot: Resolver`, `snapshot() async`, `EnvironmentValues.<scope>` slot, and `View.katana(_:)` install modifier overload |
+| `@Container(scope: .X, modules: [...])`                | Same as above; binds the graph to scope `.X` (declared via `@Scope`)            |
+| `@TestContainer(modules: [...])`                       | Same as `@Container` plus async `override(_:with:)` / `override(_:factory:)` and `TestContainerMarker` conformance |
+| `@Container` without `modules:`                        | Compile-time error                                                              |
+| Two `@Container`s at the same scope (per target)       | Plugin build error: `Scope .X is bound to multiple @Container declarations`     |
+| `@Container(scope: .X)` where `.X` isn't declared      | Plugin build error: `@Container(scope: .X) references an undeclared scope`     |
+
+### `@Module`, `@Scope`
+
+| Input                                                  | Output                                                                          |
+|--------------------------------------------------------|---------------------------------------------------------------------------------|
+| `@Module(T1.self, …)` on enum                          | Adds `static let types: [any (Injectable & Sendable).Type]` and `KatanaModule` conformance |
+| `@Scope` on enum                                       | Adds `KatanaScope` conformance. Plugin emits one `static let <case> = ContainerScope("<case>")` per enum case on `ContainerScope` |
+| `@Scope` case with associated values                   | Compile-time error                                                              |
 
 ## Concurrency Notes
 
@@ -258,21 +291,25 @@ Unlabeled parameters (`init(_ value: Foo)`), generic dependency types (`Store<Us
 - Factory closures stored by the container are not `@Sendable` — they only live inside the actor. User-supplied factory closures *are* `@Sendable` because they cross the actor boundary.
 - The protocol's `resolve(from:) async -> sending Self` makes transient ownership-transfer the single uniform shape. For `Sendable` singletons, `sending` is a harmless no-op.
 
-## Limitations (v1)
+## Limitations
 
 - A single designated `init` per type (multiple → first is used; warning emitted).
 - No property injection — constructor injection only.
-- No qualifiers / named bindings — one registration per type.
 - Variadic and `inout` init parameters are rejected.
-- No cycle detection at registration time (cycles in the dependency graph will hang at resolve time).
+- **Plugin required.** `@Container` produces only storage stubs without `KatanaCodegenPlugin`; consumer sites fail to compile, surfacing the missing plugin.
+- **Plugin is per-target.** Test targets that use `@testable import` to reach production types must re-declare their own `@Module` enums referencing those types. The scanner replays user imports in the generated file so `@testable import` lines propagate.
+- **Named bindings are container-level only** — `register(_:name:)` and `resolve(_:name:)` work, but the macro path doesn't auto-handle them. For compile-time-safe disambiguation, prefer protocol abstractions or distinct `@Scope`s.
+- **Cycle detection is runtime, not compile-time** — `Container.resolve` traps with a readable `A → B → A` chain on cycles. Compile-time cycle detection would require cross-file macro analysis and is out of scope.
+- **Cycle detection on the non-`Sendable` transient resolve path is shallow** — cycles entering a transient resolve are caught, but the chain doesn't extend through them (Swift 6's sending-isolation analysis rejects the `withValue` wrap).
+- `Container.snapshot()` includes only **unnamed** singletons. Named bindings remain accessible via `await container.resolve(_:name:)`.
 
 ## Examples
 
-A full MVVM example — model, actor-backed repository, `@MainActor @Observable` view model, SwiftUI view, and a Swift Testing suite that swaps the container per test — lives in [`Sources/Example/`](Sources/Example) with a walkthrough at [`Documentation/mvvm.md`](Documentation/mvvm.md).
+A full MVVM example — model, actor-backed repository, `@MainActor @Observable` view model, SwiftUI view with bare `@Inject`, and a Swift Testing suite that swaps deps per test — lives in [`Sources/Example/`](Sources/Example) with a walkthrough at [`Documentation/mvvm.md`](Documentation/mvvm.md).
 
 ```bash
 swift run Example                  # runs the console driver
-swift test --filter Example        # runs the 7 wiring / behaviour / swap-the-container tests
+swift test --filter ExampleTests   # 19 Swift Testing cases: wiring, behaviour, overrides, named bindings, cycle detection
 ```
 
 ## Development
@@ -287,15 +324,20 @@ swift test --filter KatanaTests/testEmptyInit  # Single test
 
 The package has these SPM targets:
 
-- `KatanaMacros` — the compiler plugin (runs at build time)
+- `KatanaMacros` — the macro compiler plugin (runs at build time)
 - `Katana` — the public library users import
-- `KatanaCodegen` — executable backing the `KatanaCodegenPlugin` build plugin
-- `KatanaCodegenPlugin` — SwiftPM build-tool plugin powering `@Module` / `@KatanaApp`
-- `KatanaClient` — runtime demo / smoke test
-- `Example` — MVVM walk-through with inline `@Container`
-- `ModularExample` — same demo, refactored to `@Module` + `@KatanaApp`
+- `KatanaCodegenCore` — scanner / emitter / validator backing the build plugin (testable)
+- `KatanaCodegen` — thin executable wrapper invoked by the plugin
+- `KatanaCodegenPlugin` — SwiftPM build-tool plugin powering `@Container` / `@TestContainer` / `@Scope`
+- `KatanaClient` — runtime smoke test for `@Injectable` + bare `Container`
+- `Example` — MVVM walk-through with `@Container(modules:)` + bare `@Inject`
+- `ModularExample` — multi-module composition with a test container at a custom scope
 
-Tests live in `KatanaTests` (macro expansion via `assertMacroExpansion`) and `ExampleTests` (Swift Testing suite exercising the example's container).
+Tests live in:
+
+- `KatanaTests` — macro expansion via `assertMacroExpansion`
+- `KatanaCodegenTests` — scanner / validator / emitter unit tests
+- `ExampleTests` — Swift Testing suite exercising the example's container
 
 ## Design
 

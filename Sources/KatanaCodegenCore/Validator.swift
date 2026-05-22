@@ -16,10 +16,8 @@ public struct ValidationError: Equatable {
 
 public enum Validator {
 
-    /// Scans for cross-module duplicate registrations. Two `@Module`s
-    /// registering the same type would silently deduplicate at emission, so
-    /// flag it explicitly — the user almost certainly meant for the type to
-    /// live in exactly one module.
+    /// Two `@Module`s registering the same type would silently deduplicate at
+    /// emission. Surface the conflict explicitly.
     public static func duplicateRegistrations(in modules: [String: ModuleDecl]) -> [ValidationError] {
         var byType: [String: [ModuleDecl]] = [:]
         for module in modules.values {
@@ -42,55 +40,77 @@ public enum Validator {
         return errors.sorted { $0.message < $1.message }
     }
 
-    /// Verifies every `@KatanaApp(modules: [...])` reference resolves to a
-    /// discovered `@Module` enum in the same target.
     public static func unknownModuleReferences(
-        apps: [AppDecl],
+        containers: [ContainerDecl],
         modules: [String: ModuleDecl]
     ) -> [ValidationError] {
         var errors: [ValidationError] = []
-        for app in apps {
-            for ref in app.modules where modules[ref] == nil {
+        for container in containers {
+            for ref in container.modules where modules[ref] == nil {
                 errors.append(ValidationError(
-                    path: "<unknown>",
+                    path: container.path.isEmpty ? "<unknown>" : container.path,
                     line: 1,
                     column: 1,
-                    message: "@KatanaApp(modules:) on \(app.name) references unknown module `\(ref)`. Add `@Module(...)` to a sibling enum, or fix the reference."
+                    message: "@\(container.isTest ? "TestContainer" : "Container")(modules:) on \(container.name) references unknown module `\(ref)`. Add `@Module(...)` to a sibling enum, or fix the reference."
                 ))
             }
         }
         return errors
     }
 
-    /// Verifies every `@KatanaTestApp(of: X.self)` resolves to a discovered
-    /// `@KatanaApp` declaration.
-    public static func unknownTestAppReferences(
-        testApps: [TestAppDecl],
-        apps: [AppDecl]
+    public static func unknownScopeReferences(
+        containers: [ContainerDecl],
+        scopes: [ScopeRegistryDecl]
     ) -> [ValidationError] {
+        var declared: Set<String> = ["default"]
+        for registry in scopes {
+            declared.formUnion(registry.cases)
+        }
         var errors: [ValidationError] = []
-        let appNames = Set(apps.map { $0.name })
-        for testApp in testApps where !appNames.contains(testApp.productionApp) {
+        for container in containers where !declared.contains(container.scope) {
             errors.append(ValidationError(
-                path: "<unknown>",
+                path: container.path.isEmpty ? "<unknown>" : container.path,
                 line: 1,
                 column: 1,
-                message: "@KatanaTestApp(of: \(testApp.productionApp).self) on \(testApp.name) references unknown @KatanaApp. Ensure the production graph is declared in the same target."
+                message: "@\(container.isTest ? "TestContainer" : "Container")(scope: .\(container.scope)) on \(container.name) references an undeclared scope. Add `case \(container.scope)` to a `@Scope` enum."
             ))
         }
         return errors
     }
 
-    /// Runs every validator and returns the union of errors.
+    /// At most one container per scope per target. Two graphs at the same
+    /// scope collide on the `EnvironmentValues.<scope>` accessor and the
+    /// `View.katana(_:)` install modifier.
+    public static func duplicateScopeBindings(in containers: [ContainerDecl]) -> [ValidationError] {
+        var byScope: [String: [ContainerDecl]] = [:]
+        for container in containers {
+            byScope[container.scope, default: []].append(container)
+        }
+
+        var errors: [ValidationError] = []
+        for (scope, owners) in byScope where owners.count > 1 {
+            let names = owners.map { $0.name }.sorted().joined(separator: ", ")
+            let primary = owners.sorted { $0.name < $1.name }.first!
+            errors.append(ValidationError(
+                path: primary.path.isEmpty ? "<unknown>" : primary.path,
+                line: 1,
+                column: 1,
+                message: "Scope .\(scope) is bound to multiple @Container/@TestContainer declarations: \(names). Each scope may bind to at most one container per target — give the duplicates a custom @Scope case."
+            ))
+        }
+        return errors.sorted { $0.message < $1.message }
+    }
+
     public static func validate(
-        apps: [AppDecl],
-        testApps: [TestAppDecl],
+        containers: [ContainerDecl],
+        scopes: [ScopeRegistryDecl],
         modules: [String: ModuleDecl]
     ) -> [ValidationError] {
         var errors: [ValidationError] = []
         errors.append(contentsOf: duplicateRegistrations(in: modules))
-        errors.append(contentsOf: unknownModuleReferences(apps: apps, modules: modules))
-        errors.append(contentsOf: unknownTestAppReferences(testApps: testApps, apps: apps))
+        errors.append(contentsOf: unknownModuleReferences(containers: containers, modules: modules))
+        errors.append(contentsOf: unknownScopeReferences(containers: containers, scopes: scopes))
+        errors.append(contentsOf: duplicateScopeBindings(in: containers))
         return errors
     }
 }

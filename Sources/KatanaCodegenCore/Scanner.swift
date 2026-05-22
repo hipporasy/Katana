@@ -2,8 +2,6 @@ import Foundation
 import SwiftParser
 import SwiftSyntax
 
-// MARK: - Scanner model
-
 public struct ModuleDecl: Equatable {
     public let name: String
     public let types: [String]
@@ -16,40 +14,65 @@ public struct ModuleDecl: Equatable {
     }
 }
 
-public struct AppDecl: Equatable {
+public struct ContainerDecl: Equatable {
     public let name: String
+    public let scope: String
     public let modules: [String]
-    public let accessLevel: String       // "public" or "" (internal)
-    public let availability: String?     // raw @available(...) attribute, if any
+    public let accessLevel: String
+    public let availability: String?
+    public let isTest: Bool
+    public let path: String
 
-    public init(name: String, modules: [String], accessLevel: String = "", availability: String? = nil) {
+    public init(
+        name: String,
+        scope: String = "default",
+        modules: [String],
+        accessLevel: String = "",
+        availability: String? = nil,
+        isTest: Bool = false,
+        path: String = ""
+    ) {
         self.name = name
+        self.scope = scope
         self.modules = modules
         self.accessLevel = accessLevel
         self.availability = availability
+        self.isTest = isTest
+        self.path = path
     }
 }
 
-public struct TestAppDecl: Equatable {
+public struct ScopeRegistryDecl: Equatable {
     public let name: String
-    public let productionApp: String
-    public let accessLevel: String
-    public let availability: String?
+    public let cases: [String]
+    public let path: String
 
-    public init(name: String, productionApp: String, accessLevel: String = "", availability: String? = nil) {
+    public init(name: String, cases: [String], path: String = "") {
         self.name = name
-        self.productionApp = productionApp
-        self.accessLevel = accessLevel
-        self.availability = availability
+        self.cases = cases
+        self.path = path
     }
 }
 
-// MARK: - Scanner
+/// An import statement extracted from source. The emitter replays these in
+/// the generated file so it can reference the same types user files do —
+/// needed for test targets that use `@testable import` to reach internal
+/// production types.
+public struct ImportDecl: Equatable, Hashable {
+    public let moduleName: String
+    public let isTestable: Bool
+
+    public init(moduleName: String, isTestable: Bool) {
+        self.moduleName = moduleName
+        self.isTestable = isTestable
+    }
+}
 
 public final class Scanner {
     public private(set) var modules: [String: ModuleDecl] = [:]
-    public private(set) var apps: [AppDecl] = []
-    public private(set) var testApps: [TestAppDecl] = []
+    public private(set) var containers: [ContainerDecl] = []
+    public private(set) var scopes: [ScopeRegistryDecl] = []
+    public private(set) var imports: Set<ImportDecl> = []
 
     public init() {}
 
@@ -61,28 +84,49 @@ public final class Scanner {
         for module in visitor.modules {
             modules[module.name] = module
         }
-        apps.append(contentsOf: visitor.apps)
-        testApps.append(contentsOf: visitor.testApps)
+        containers.append(contentsOf: visitor.containers)
+        scopes.append(contentsOf: visitor.scopes)
+        for imp in visitor.imports {
+            imports.insert(imp)
+        }
     }
 }
-
-// MARK: - Syntax visitor
 
 private final class ScannerVisitor: SyntaxVisitor {
     let currentPath: String
     var modules: [ModuleDecl] = []
-    var apps: [AppDecl] = []
-    var testApps: [TestAppDecl] = []
+    var containers: [ContainerDecl] = []
+    var scopes: [ScopeRegistryDecl] = []
+    var imports: [ImportDecl] = []
 
     init(currentPath: String, viewMode: SyntaxTreeViewMode) {
         self.currentPath = currentPath
         super.init(viewMode: viewMode)
     }
 
+    override func visit(_ node: ImportDeclSyntax) -> SyntaxVisitorContinueKind {
+        let modulePath = node.path.map { $0.name.text }.joined(separator: ".")
+        // Framework imports are already emitted at the top of the generated file.
+        let skipList: Set<String> = ["Foundation", "Katana", "SwiftUI", "SwiftUICore"]
+        if skipList.contains(modulePath) { return .skipChildren }
+
+        let isTestable = node.attributes.contains { element in
+            guard let attr = element.as(AttributeSyntax.self),
+                  let id = attr.attributeName.as(IdentifierTypeSyntax.self) else { return false }
+            return id.name.text == "testable"
+        }
+        imports.append(ImportDecl(moduleName: modulePath, isTestable: isTestable))
+        return .skipChildren
+    }
+
     override func visit(_ node: EnumDeclSyntax) -> SyntaxVisitorContinueKind {
         if let attr = node.attributes.firstAttribute(named: "Module") {
             let types = parseTypeListArguments(attr)
             modules.append(ModuleDecl(name: node.name.text, types: types, path: currentPath))
+        }
+        if node.attributes.firstAttribute(named: "Scope") != nil {
+            let cases = parseEnumCases(node)
+            scopes.append(ScopeRegistryDecl(name: node.name.text, cases: cases, path: currentPath))
         }
         return .skipChildren
     }
@@ -91,29 +135,30 @@ private final class ScannerVisitor: SyntaxVisitor {
         let access = accessLevel(of: node.modifiers)
         let availability = availability(of: node.attributes)
 
-        if let attr = node.attributes.firstAttribute(named: "KatanaApp") {
-            let mods = parseModulesArgument(attr)
-            apps.append(AppDecl(
+        if let attr = node.attributes.firstAttribute(named: "Container") {
+            containers.append(ContainerDecl(
                 name: node.name.text,
-                modules: mods,
+                scope: parseScopeArgument(attr) ?? "default",
+                modules: parseModulesArgument(attr),
                 accessLevel: access,
-                availability: availability
+                availability: availability,
+                isTest: false,
+                path: currentPath
             ))
-        } else if let attr = node.attributes.firstAttribute(named: "KatanaTestApp") {
-            if let prod = parseOfArgument(attr) {
-                testApps.append(TestAppDecl(
-                    name: node.name.text,
-                    productionApp: prod,
-                    accessLevel: access,
-                    availability: availability
-                ))
-            }
+        } else if let attr = node.attributes.firstAttribute(named: "TestContainer") {
+            containers.append(ContainerDecl(
+                name: node.name.text,
+                scope: parseScopeArgument(attr) ?? "default",
+                modules: parseModulesArgument(attr),
+                accessLevel: access,
+                availability: availability,
+                isTest: true,
+                path: currentPath
+            ))
         }
         return .skipChildren
     }
 }
-
-// MARK: - Attribute parsing helpers
 
 extension AttributeListSyntax {
     func firstAttribute(named name: String) -> AttributeSyntax? {
@@ -128,14 +173,11 @@ extension AttributeListSyntax {
     }
 }
 
-/// Reads `(A.self, B.self, C.self)` from an attribute's variadic positional args.
 private func parseTypeListArguments(_ attr: AttributeSyntax) -> [String] {
     guard let args = attr.arguments?.as(LabeledExprListSyntax.self) else { return [] }
     return args.compactMap { extractTypeName(from: $0.expression) }
 }
 
-/// Reads `modules: [A.self, B.self]` — finds the labeled `modules:` arg and
-/// extracts the array contents.
 private func parseModulesArgument(_ attr: AttributeSyntax) -> [String] {
     guard let args = attr.arguments?.as(LabeledExprListSyntax.self) else { return [] }
     for arg in args where arg.label?.text == "modules" {
@@ -146,16 +188,16 @@ private func parseModulesArgument(_ attr: AttributeSyntax) -> [String] {
     return []
 }
 
-/// Reads `of: App.self` — finds the labeled `of:` arg, returns "App".
-private func parseOfArgument(_ attr: AttributeSyntax) -> String? {
+private func parseScopeArgument(_ attr: AttributeSyntax) -> String? {
     guard let args = attr.arguments?.as(LabeledExprListSyntax.self) else { return nil }
-    for arg in args where arg.label?.text == "of" {
-        return extractTypeName(from: arg.expression)
+    for arg in args where arg.label?.text == "scope" {
+        if let memberAccess = arg.expression.as(MemberAccessExprSyntax.self) {
+            return memberAccess.declName.baseName.text
+        }
     }
     return nil
 }
 
-/// Pulls "Foo" out of an expression like `Foo.self`.
 private func extractTypeName(from expr: ExprSyntax) -> String? {
     guard let memberAccess = expr.as(MemberAccessExprSyntax.self),
           memberAccess.declName.baseName.text == "self",
@@ -165,7 +207,17 @@ private func extractTypeName(from expr: ExprSyntax) -> String? {
     return base.trimmedDescription
 }
 
-// MARK: - Modifier / attribute helpers
+private func parseEnumCases(_ enumDecl: EnumDeclSyntax) -> [String] {
+    var names: [String] = []
+    for member in enumDecl.memberBlock.members {
+        guard let caseDecl = member.decl.as(EnumCaseDeclSyntax.self) else { continue }
+        for element in caseDecl.elements {
+            if element.parameterClause != nil { continue }
+            names.append(element.name.text)
+        }
+    }
+    return names
+}
 
 private func accessLevel(of modifiers: DeclModifierListSyntax) -> String {
     for modifier in modifiers {

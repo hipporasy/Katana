@@ -1,8 +1,6 @@
 import Foundation
 import Katana
 
-// MARK: - Injectable types (the dependency graph)
-
 @Injectable
 class Logger: @unchecked Sendable {
     required init() {}
@@ -33,10 +31,16 @@ final class AnalyticsClient: Sendable {
     func track(_ event: String) { logger.log("analytics: \(event)") }
 }
 
-// MARK: - Modules
-
 @Module(Logger.self, AnalyticsClient.self)
 enum ServiceModule {}
 
 @Module(TodoRepository.self)
 enum RepositoryModule {}
+
+/// `App` binds to `.default`. `TestApp` uses `.modularTest` because both live
+/// in the same target — production code would normally split them across
+/// targets and both could use `.default`.
+@Scope
+enum ModularExampleScope {
+    case modularTest
+}

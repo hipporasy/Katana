@@ -149,7 +149,6 @@ struct KatanaPlugin: CompilerPlugin {
         ContainerMacro.self,
         TestContainerMacro.self,
         ModuleMacro.self,
-        KatanaAppMacro.self,
-        KatanaTestAppMacro.self,
+        ScopeMacro.self,
     ]
 }

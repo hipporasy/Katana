@@ -5,10 +5,9 @@ import SwiftSyntaxBuilder
 import SwiftSyntaxMacros
 
 /// `@Module(T1.self, T2.self, ...)` — groups injectable types so they can be
-/// referenced as a unit from `@KatanaApp(modules: [...])`. Useful even before
-/// the `KatanaCodegen` build plugin lands: the macro emits a `static let types`
-/// array that you can read at runtime for documentation, debugging, or
-/// hand-rolled aggregation.
+/// referenced as a unit from `@Container(modules: [...])`. The macro also
+/// emits a `static let types` array that you can read at runtime for
+/// documentation, debugging, or hand-rolled aggregation.
 ///
 /// Emits:
 ///   - `static let types: [any (Injectable & Sendable).Type] = [...]`

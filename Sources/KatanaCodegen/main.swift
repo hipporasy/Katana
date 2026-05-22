@@ -34,8 +34,8 @@ for path in inputPaths {
 // MARK: - Validate
 
 let errors = Validator.validate(
-    apps: scanner.apps,
-    testApps: scanner.testApps,
+    containers: scanner.containers,
+    scopes: scanner.scopes,
     modules: scanner.modules
 )
 
@@ -49,9 +49,10 @@ if !errors.isEmpty {
 // MARK: - Emit
 
 let generated = Emitter.emit(
-    apps: scanner.apps,
-    testApps: scanner.testApps,
-    modules: scanner.modules
+    containers: scanner.containers,
+    scopes: scanner.scopes,
+    modules: scanner.modules,
+    imports: scanner.imports
 )
 
 try generated.write(toFile: outputPath, atomically: true, encoding: .utf8)

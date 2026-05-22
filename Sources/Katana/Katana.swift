@@ -15,116 +15,93 @@
 public macro Injectable(scope: Scope = .singleton) =
     #externalMacro(module: "KatanaMacros", type: "InjectableMacro")
 
-/// Marks a class as a typed dependency-graph container. The macro reads the
-/// listed types, emits typed `resolve(_:)` overloads (compile-checked against
-/// the type list), and generates a nested `Snapshot` resolver plus a nested
-/// `@Inject` property wrapper for SwiftUI.
+/// Declares a typed dependency-graph class. The `KatanaCodegen` build plugin
+/// aggregates types from the listed `@Module`s and emits the typed API:
+/// `init(_:) async`, per-type `resolve(_:) async` overloads, nested
+/// `Snapshot`, `snapshot() async`, the matching `EnvironmentValues` slot, and
+/// a `View.katana(_:)` install modifier.
 ///
 /// ```swift
-/// @Container(Logger.self, TodoRepository.self, TodoListViewModel.self)
+/// @Module(Logger.self, AnalyticsClient.self)
+/// enum ServiceModule {}
+///
+/// @Container(modules: [ServiceModule.self])
 /// final class App {}
 ///
-/// let app = await App()
-/// let vm = await app.resolve(TodoListViewModel.self)   // compile-checked
-/// let snap = await app.snapshot()                       // App.Snapshot
-///
 /// struct ContentView: View {
-///     @App.Inject var viewModel: TodoListViewModel
-///     var body: some View { Text("\(viewModel.todos.count)") }
+///     @Inject var logger: Logger
 /// }
 /// ```
 ///
-/// Pass a closure to `init` for one-shot overrides — useful in tests:
+/// Declare additional scopes with `@Scope`:
 ///
 /// ```swift
-/// let app = await App { c in
-///     await c.override(Logger.self, with: SpyLogger())
+/// @Scope enum AppScope { case checkout }
+///
+/// @Container(scope: .checkout, modules: [CheckoutModule.self])
+/// final class CheckoutGraph {}
+///
+/// struct CheckoutView: View {
+///     @Inject(\.checkout) var vm: CheckoutViewModel
 /// }
 /// ```
+///
+/// Requires the `KatanaCodegenPlugin` SwiftPM plugin on the target.
 @attached(member, names: arbitrary)
-public macro Container(_ types: any (Injectable & Sendable).Type...) =
+public macro Container(scope: ContainerScope = .default, modules: [any KatanaModule.Type]) =
     #externalMacro(module: "KatanaMacros", type: "ContainerMacro")
 
-/// `@TestContainer` is the test-target peer of `@Container`. It emits the
-/// same shape — typed `resolve(_:)` overloads, nested `Snapshot`, nested
-/// `Inject` — plus post-construction `override(_:with:)` / `override(_:factory:)`
-/// methods and a `TestContainerMarker` conformance for tooling.
-///
-/// The type list is duplicated from the production `@Container`; Swift macros
-/// can't read another declaration's annotation arguments across files. Diff
-/// review or a small lint script keeps them in sync.
+/// Test peer of `@Container`. Emits the same shape plus post-construction
+/// `override(_:with:) async` / `override(_:factory:) async` methods and a
+/// `TestContainerMarker` conformance.
 ///
 /// ```swift
-/// @TestContainer(Logger.self, TodoRepository.self, TodoListViewModel.self)
+/// @TestContainer(modules: [TestAppModule.self])
 /// final class TestApp {}
 ///
 /// @Test func togglesCompletion() async {
-///     let app = await TestApp()
-///     await app.override(Logger.self, with: SpyLogger())
+///     let app = await TestApp { c in
+///         await c.override(Logger.self, with: SpyLogger())
+///     }
 ///     let vm = await app.resolve(TodoListViewModel.self)
-///     // ...
 /// }
 /// ```
 @attached(member, names: arbitrary)
 @attached(extension, conformances: TestContainerMarker)
-public macro TestContainer(_ types: any (Injectable & Sendable).Type...) =
+public macro TestContainer(scope: ContainerScope = .default, modules: [any KatanaModule.Type]) =
     #externalMacro(module: "KatanaMacros", type: "TestContainerMacro")
 
-/// Groups injectable types into a named module so they can be aggregated as a
-/// unit from `@KatanaApp(modules: [...])`. The macro emits a `static let types`
-/// list and a `KatanaModule` conformance — both useful at runtime for
-/// introspection even before the `KatanaCodegen` build plugin ships.
+/// Groups injectable types into a named module so they can be aggregated from
+/// `@Container(modules: [...])`. Emits a `static let types` array and a
+/// `KatanaModule` conformance.
 ///
 /// ```swift
 /// @Module(TodoRepository.self, UserRepository.self)
 /// enum RepositoryModule {}
-///
-/// @Module(Logger.self, NetworkClient.self)
-/// enum ServiceModule {}
 /// ```
-///
-/// Each module-annotated enum gets a synthesised `types` static property:
-///
-/// ```swift
-/// // RepositoryModule.types == [TodoRepository.self, UserRepository.self]
-/// for type in RepositoryModule.types {
-///     print(type)
-/// }
-/// ```
-///
-/// Aggregating modules into a typed container is a Phase 3b feature — see
-/// `Documentation/modules.md`.
 @attached(member, names: named(types))
 @attached(extension, conformances: KatanaModule)
 public macro Module(_ types: any (Injectable & Sendable).Type...) =
     #externalMacro(module: "KatanaMacros", type: "ModuleMacro")
 
-/// `@KatanaApp(modules: [...])` — marker for the `KatanaCodegen` build plugin.
-/// The plugin reads the listed `@Module`s, aggregates their type lists, and
-/// emits a generated extension on the annotated class with the same shape
-/// `@Container` produces from an inline type list.
+/// Declares a registry of custom container scopes. Each enum case becomes a
+/// `static let` on `ContainerScope`, usable as `@Container(scope: .<case>, …)`
+/// and `@Inject(\.<case>) var x: T`.
+///
+/// The macro emits only the `KatanaScope` marker conformance — the
+/// `ContainerScope` static properties are emitted by the `KatanaCodegen`
+/// build plugin.
 ///
 /// ```swift
-/// @KatanaApp(modules: [RepositoryModule.self, ServiceModule.self])
-/// public final class App {}
+/// @Scope
+/// enum AppScope {
+///     case checkout
+///     case payment
+/// }
 /// ```
 ///
-/// The plugin must be wired into your `Package.swift`. Without it, this
-/// annotation produces an empty class. See `Documentation/modules.md`.
-@attached(member, names: arbitrary)
-public macro KatanaApp(modules: [any KatanaModule.Type]) =
-    #externalMacro(module: "KatanaMacros", type: "KatanaAppMacro")
-
-/// `@KatanaTestApp(of: App.self)` — marker for the `KatanaCodegen` build plugin.
-/// Generates a test peer of a `@KatanaApp`-built graph with override-first
-/// ergonomics and a `TestContainerMarker` conformance.
-///
-/// ```swift
-/// @KatanaTestApp(of: App.self)
-/// public final class TestApp {}
-/// ```
-///
-/// Requires the `KatanaCodegen` plugin — see `Documentation/modules.md`.
-@attached(member, names: arbitrary)
-public macro KatanaTestApp(of app: Any.Type) =
-    #externalMacro(module: "KatanaMacros", type: "KatanaTestAppMacro")
+/// Cases with associated values are rejected. Requires the
+/// `KatanaCodegenPlugin` on the target.
+@attached(extension, conformances: KatanaScope)
+public macro Scope() =
+    #externalMacro(module: "KatanaMacros", type: "ScopeMacro")

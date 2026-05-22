@@ -1,11 +1,6 @@
 # `@Module` — module composition
 
-Katana ships two ways to declare a dependency graph:
-
-- **`@Container(T1.self, T2.self, ...)`** — inline type list, pure macro, no build plugin. Best for small apps and single-file composition. Covered in [`mvvm.md`](mvvm.md).
-- **`@Module` + `@KatanaApp` + `KatanaCodegen` build plugin** — type lists split across files, aggregated at build time. Best for larger apps with feature-team-owned modules. This document.
-
-Both paths produce **structurally identical** code: typed `resolve(_:)` overloads, typed `Snapshot`, typed `Inject`. Compile-time safety is the same. Pick the shape that fits the codebase.
+Katana declares a dependency graph by aggregating one or more `@Module` enums into a `@Container`. The `KatanaCodegen` SwiftPM build plugin scans the target, validates the graph, and emits the typed API before compilation.
 
 ## Quick tour
 
@@ -18,47 +13,57 @@ enum ServiceModule {}
 @Module(TodoRepository.self, UserRepository.self)
 enum RepositoryModule {}
 
+// Modules/ViewModelModule.swift
+@available(macOS 14, iOS 17, *)
+@Module(TodoListViewModel.self)
+enum ViewModelModule {}
+
 // App.swift
-@KatanaApp(modules: [ServiceModule.self, RepositoryModule.self])
+@available(macOS 14, iOS 17, *)
+@Container(modules: [
+    ServiceModule.self,
+    RepositoryModule.self,
+    ViewModelModule.self,
+])
 final class App {}
 ```
 
-The `KatanaCodegen` build plugin scans the target, aggregates the type lists across files, and emits a typed extension on `App` with:
+The build plugin scans the target, aggregates the type lists across files, and emits an `extension App` with:
 
 - `init(_:) async` taking an optional override closure
 - `resolve(_:) async` overload per registered type
 - `App.Snapshot` (typed, `Sendable`)
 - `snapshot() async -> Snapshot`
-- `App.Inject` property wrapper for SwiftUI
-- `EnvironmentValues.appSnapshot` typed env key
-- `View.installApp(_:)` convenience modifier
+- `EnvironmentValues.katanaDefault: (any Resolver)?`
+- `View.katana(_ snapshot: App.Snapshot) -> some View`
+- `extension Inject { init() }` (only because `App` is the target's single `.default`-scoped container)
 
 After build:
 
 ```swift
 let app = await App()
-let repo = await app.resolve(TodoRepository.self)    // ✅ compile-checked
-let bad = await app.resolve(URLSession.self)         // ❌ compile error
+let repo = await app.resolve(TodoRepository.self)    // compile-checked
+let bad = await app.resolve(URLSession.self)         // compile error
 let snap = await app.snapshot()                       // App.Snapshot
 ```
 
 ## Enabling the plugin in your `Package.swift`
 
-The plugin is opt-in per target:
+The plugin is **mandatory** on every target that uses `@Container`:
 
 ```swift
 .executableTarget(
     name: "MyApp",
     dependencies: ["Katana"],
-    plugins: ["KatanaCodegenPlugin"]   // ← here
+    plugins: ["KatanaCodegenPlugin"]   // ← required
 )
 ```
 
-If your `MyApp` target uses `@KatanaApp` and you haven't added the plugin, the macro produces an empty class — every call site that expects `resolve(_:)`, `snapshot()`, etc. will fail to compile, surfacing the missing plugin.
+Without it, only the macro's storage stub exists and every call site that expects `resolve(_:)`, `snapshot()`, etc. fails to compile, surfacing the missing plugin.
 
 ## SwiftUI integration
 
-The plugin generates a typed env key per app, so multi-graph apps work without any manual env-key boilerplate (the manual workaround in [`multi-container.md`](multi-container.md) is for plain `@Container` only).
+The plugin generates a typed env key per scope. Bare `@Inject` reads the `.default` graph; explicit `@Inject(\.<scope>)` reads named scopes.
 
 ```swift
 @main
@@ -68,7 +73,7 @@ struct MyApp: SwiftUI.App {
     var body: some Scene {
         WindowGroup {
             if let snapshot {
-                ContentView().installApp(snapshot)        // ← generated modifier
+                ContentView().katana(snapshot)             // ← overload picked by snapshot type
             } else {
                 ProgressView().task { snapshot = await App().snapshot() }
             }
@@ -77,34 +82,36 @@ struct MyApp: SwiftUI.App {
 }
 
 struct ContentView: View {
-    @App.Inject var repo: TodoRepository                  // ← compile-checked
+    @Inject var repo: TodoRepository                       // ← bare, compile-checked
     var body: some View { /* ... */ }
 }
 ```
 
-For multiple graphs in the same app, each one gets its own typed env key, modifier, and `Inject`:
+For multiple graphs in the same app, declare a `@Scope` and bind each `@Container` to a case:
 
 ```swift
-@KatanaApp(modules: [...])
-final class App {}
+@Scope
+enum AppScope { case checkout }
 
-@KatanaApp(modules: [...])
+@Container(modules: [...])
+final class App {}                                         // .default
+
+@Container(scope: .checkout, modules: [...])
 final class Checkout {}
 
 // Plugin generates:
-//   - \.appSnapshot, .installApp(_:), @App.Inject
-//   - \.checkoutSnapshot, .installCheckout(_:), @Checkout.Inject
+//   - \.katanaDefault, .katana(_:App.Snapshot), bare @Inject
+//   - \.checkout,      .katana(_:Checkout.Snapshot), @Inject(\.checkout)
 //
-// They're independent — view `@App.Inject var x: T` only sees App's graph;
-// `@Checkout.Inject var y: U` only sees Checkout's.
+// They're independent — `@Inject var x: T` reads App; `@Inject(\.checkout) var y: U` reads Checkout.
 ```
 
-## Testing — `@KatanaTestApp`
+## Testing — `@TestContainer`
 
-The test peer reads the production app's module list and emits the same shape plus `override(_:with:) async`, `override(_:factory:) async`, and `TestContainerMarker` conformance:
+The test peer reads its own module list and emits the same shape plus `override(_:with:) async`, `override(_:factory:) async`, and `TestContainerMarker` conformance:
 
 ```swift
-@KatanaTestApp(of: App.self)
+@TestContainer(modules: [TestAppModule.self])
 final class TestApp {}
 
 @Test func usesSpyLogger() async {
@@ -124,7 +131,7 @@ final class TestApp {}
 }
 ```
 
-`@KatanaTestApp` requires the plugin (it reads the production `@KatanaApp`'s module list). In your test target's `Package.swift`:
+`@TestContainer` requires the plugin on the test target:
 
 ```swift
 .testTarget(
@@ -134,44 +141,62 @@ final class TestApp {}
 )
 ```
 
+### Cross-target imports
+
+The plugin scans per target. If a test target uses `@testable import MyApp` to reach internal production types, the scanner records that import and the emitter replays it in the generated file:
+
+```swift
+// Generated KatanaGenerated.swift for the test target:
+import Katana
+@testable import MyApp
+
+extension TestApp { ... }
+```
+
+Re-declare the `@Module` enums in the test target (referencing the production types). The production target's `@Module` enums aren't visible to the plugin's per-target scan.
+
+To avoid `EnvironmentValues.katanaDefault` colliding between production and test targets (both at `.default`), put `@TestContainer` on a custom scope:
+
+```swift
+@Scope enum AppTestsScope { case test }
+@TestContainer(scope: .test, modules: [TestAppModule.self]) final class TestApp {}
+```
+
+The test target's `TestApp` now binds to `.test` (its own env slot). Tests use `app.resolve(...)` and `app.override(...)` directly — they don't go through SwiftUI's environment.
+
 ## How the plugin works
 
 `KatanaCodegen` is a SwiftPM build-tool plugin that runs once per target before compilation. It:
 
 1. Parses every `.swift` file in the target with SwiftSyntax (read-only — no source modification).
-2. Collects `@Module(...)` declarations, recording each module's name and type list.
-3. Collects `@KatanaApp(modules: [...])` and `@KatanaTestApp(of: …)` declarations.
-4. Aggregates types per app (deduplicating across modules).
-5. Emits a single `KatanaGenerated.swift` file in the build directory containing:
-   - One extension per `@KatanaApp` with the typed API
-   - One extension per `@KatanaTestApp` with the test API + marker conformance
-   - Per-app `EnvironmentKey`, `EnvironmentValues` extension, and `View` modifier
-6. The build system compiles the generated file alongside the user's sources.
+2. Collects:
+   - `@Module(...)` declarations (name + type list)
+   - `@Container(scope:, modules:)` / `@TestContainer(scope:, modules:)` declarations (name + scope + module references)
+   - `@Scope` enum declarations (case names → become `ContainerScope` statics)
+   - `import` / `@testable import` declarations (replayed in the generated file)
+3. Validates:
+   - No type registered in two different `@Module` enums
+   - Every module reference resolves to a discovered `@Module`
+   - Every scope reference is `.default` or declared by some `@Scope`
+   - At most one `@Container` per scope per target
+4. Emits a single `KatanaGenerated.swift` file in the build directory containing:
+   - The collected user imports (so the generated file sees the same internal types)
+   - `extension ContainerScope { static let <case> = ... }` for each `@Scope` case
+   - One extension per `@Container` with the typed API and SwiftUI plumbing
+   - The bare `Inject.init()` overload (only when exactly one `@Container` binds to `.default`)
 
 The plugin is **idempotent** and **incremental**: it re-runs only when the target's `.swift` files change, and the output is deterministic for the same input set.
 
-## When to choose `@Container` vs `@KatanaApp`
-
-| Use `@Container` (inline) | Use `@KatanaApp` (modular) |
-|---|---|
-| Single file is enough          | Type list spans multiple files / teams       |
-| You want no build dependency  | You're OK with a SwiftPM plugin              |
-| Small app, < ~15 dependencies | Larger app, modular ownership                |
-| Faster cold builds             | Slower cold builds (plugin scans + codegen)  |
-| Single graph                   | Multi-graph (per-feature, plugin SDKs, etc.) |
-
-Mix freely — a project can use both on different targets.
-
 ## Anti-patterns and limits
 
-- **Don't register the same type in two `@Module`s.** The plugin deduplicates silently today; a future version may diagnose the conflict.
-- **Don't reference a module that doesn't exist.** The plugin emits a Swift `#error` directive when `@KatanaTestApp(of: X.self)` can't find `X`'s `@KatanaApp`.
-- **Don't put `@KatanaApp` in a target without the plugin enabled.** You'll get an empty class and unresolved-member errors downstream.
+- **Don't register the same type in two `@Module`s.** The plugin emits a build error: "@Module conflict: T is registered in multiple @Module enums."
+- **Don't reference a module that doesn't exist.** The plugin emits a build error: "@Container(modules:) references unknown module `X`."
+- **Don't reference an undeclared scope.** The plugin emits a build error pointing at the `@Container(scope: .X)` site and suggesting a `@Scope` enum case.
+- **Don't put `@Container` in a target without the plugin enabled.** You'll get a storage-only class and unresolved-member errors downstream.
 - **IDE seam**: after pulling new sources, run one build before the IDE catches up to the generated `App.resolve` overloads. Same experience as Hilt's annotation processor on Android.
 
 ## See also
 
-- [`mvvm.md`](mvvm.md) — single-graph MVVM walkthrough using `@Container`
-- [`multi-container.md`](multi-container.md) — multi-graph patterns with plain `@Container` (manual env-key boilerplate)
+- [`mvvm.md`](mvvm.md) — single-graph MVVM walkthrough using `@Container(modules:)`
+- [`multi-container.md`](multi-container.md) — multi-graph patterns with `@Scope`
 - [`design.md`](design.md) — macro contract and scope rules
-- [`roadmap.md`](roadmap.md) — phased plan

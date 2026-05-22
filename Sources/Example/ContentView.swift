@@ -2,13 +2,9 @@
 import SwiftUI
 import Katana
 
-/// MVVM view. `@App.Inject` is the macro-generated typed property wrapper —
-/// it knows the App graph at compile time, so resolving an unregistered type
-/// would be a compile error. No `Container`, no manual `resolve`, no per-type
-/// `.environment(...)` plumbing.
 @available(macOS 14, iOS 17, *)
 struct ContentView: View {
-    @App.Inject var viewModel: TodoListViewModel
+    @Inject var viewModel: TodoListViewModel
     @State private var draft: String = ""
 
     var body: some View {
@@ -44,13 +40,7 @@ struct ContentView: View {
     }
 }
 
-/// Drop-in SwiftUI app entry point — the composition root.
-///
-/// The `App` graph is built and snapshot once at launch, then installed in
-/// the environment with `.katana(snapshot)`. Every descendant view reads its
-/// dependencies with `@App.Inject` — compile-checked against the type list,
-/// no per-VM `.environment(...)` call regardless of how many view models the
-/// graph holds.
+/// Composition root example:
 ///
 /// ```swift
 /// @main

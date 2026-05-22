@@ -20,8 +20,7 @@ let snap = await app.snapshot()
 let again = snap.resolve(TodoRepository.self)
 print("\nsnapshot returns same repo:", repo === again)
 
-// MARK: - TestApp smoke test (would normally live in a Tests target)
-
+// TestApp smoke test — would normally live in a Tests target.
 print("\n— TestApp smoke test —")
 final class SpyLogger: Logger, @unchecked Sendable {
     nonisolated(unsafe) var lines: [String] = []
@@ -37,7 +36,6 @@ testLogger.log("captured by spy")
 print("spy is a SpyLogger:", testLogger is SpyLogger)
 print("spy captured:", (testLogger as? SpyLogger)?.lines ?? [])
 
-// Post-construction override.
 let testApp2 = await TestApp()
 let anotherSpy = SpyLogger()
 await testApp2.override(Logger.self, with: anotherSpy)
@@ -45,5 +43,4 @@ let postLogger = await testApp2.resolve(Logger.self)
 postLogger.log("after construction")
 print("post-construction override took effect:", postLogger === anotherSpy)
 
-// Marker conformance compiles → @KatanaTestApp emitted it.
 let _: any TestContainerMarker = testApp
