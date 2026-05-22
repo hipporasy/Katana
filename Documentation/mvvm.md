@@ -192,26 +192,20 @@ struct ContentView: View {
 
 ### Where does the resolution happen?
 
-**Once**, at the composition root. The `@main` app builds `App`, calls `snapshot()` to eagerly resolve every singleton into the typed `App.Snapshot`, and installs it with one `.katana(snapshot)` call:
+**Once**, at the composition root. The `@main` app passes the graph type to `.katana(...)`; the framework handles construction, snapshot, and environment install:
 
 ```swift
 @main
 struct ExampleApp: SwiftUI.App {
-    @State private var snapshot: App.Snapshot?
-
     var body: some Scene {
         WindowGroup {
-            if let snapshot {
-                ContentView().katana(snapshot)        // ← one call, period
-            } else {
-                ProgressView().task {
-                    snapshot = await App().snapshot()
-                }
-            }
+            ContentView().katana(App.self)
         }
     }
 }
 ```
+
+> **Naming note**: this guide uses `App` for the `@Container` class to match the existing `Sources/Example/` code. In a real SwiftUI app where the `@main` struct conforms to `SwiftUI.App`, the bare `App` name collides — use `AppGraph` / `AppContainer` / `Composition` for your `@Container` class to avoid ambiguity. See [`modules.md`](modules.md#naming).
 
 **100 view models? Still one `.katana(...)` call.** Each descendant view writes `@Inject var x: SomeViewModel` — no per-type environment plumbing, no prop-drilling, no service location.
 

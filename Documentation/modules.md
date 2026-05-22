@@ -18,33 +18,35 @@ enum RepositoryModule {}
 @Module(TodoListViewModel.self)
 enum ViewModelModule {}
 
-// App.swift
+// AppGraph.swift
 @available(macOS 14, iOS 17, *)
 @Container(modules: [
     ServiceModule.self,
     RepositoryModule.self,
     ViewModelModule.self,
 ])
-final class App {}
+final class AppGraph {}
 ```
 
-The build plugin scans the target, aggregates the type lists across files, and emits an `extension App` with:
+> **Naming**: avoid calling your `@Container` class `App` — it collides with `SwiftUI.App` (the protocol). In any file that `import`s SwiftUI, the bare name `App` resolves ambiguously and `App.Snapshot` / `await App()` either fail to compile or pick the wrong type. Use `AppGraph`, `AppContainer`, `Composition`, or any other unambiguous name.
+
+The build plugin scans the target, aggregates the type lists across files, and emits an `extension AppGraph` with:
 
 - `init(_:) async` taking an optional override closure
 - `resolve(_:) async` overload per registered type
-- `App.Snapshot` (typed, `Sendable`)
+- `AppGraph.Snapshot` (typed, `Sendable`)
 - `snapshot() async -> Snapshot`
 - `EnvironmentValues.katanaDefault: (any Resolver)?`
-- `View.katana(_ snapshot: App.Snapshot) -> some View`
-- `extension Inject { init() }` (only because `App` is the target's single `.default`-scoped container)
+- `View.katana(_ snapshot: AppGraph.Snapshot) -> some View`
+- `extension Inject { init() }` (only because `AppGraph` is the target's single `.default`-scoped container)
 
 After build:
 
 ```swift
-let app = await App()
-let repo = await app.resolve(TodoRepository.self)    // compile-checked
-let bad = await app.resolve(URLSession.self)         // compile error
-let snap = await app.snapshot()                       // App.Snapshot
+let graph = await AppGraph()
+let repo = await graph.resolve(TodoRepository.self)    // compile-checked
+let bad = await graph.resolve(URLSession.self)         // compile error
+let snap = await graph.snapshot()                       // AppGraph.Snapshot
 ```
 
 ## Enabling the plugin in your `Package.swift`
@@ -68,15 +70,9 @@ The plugin generates a typed env key per scope. Bare `@Inject` reads the `.defau
 ```swift
 @main
 struct MyApp: SwiftUI.App {
-    @State private var snapshot: App.Snapshot?
-
     var body: some Scene {
         WindowGroup {
-            if let snapshot {
-                ContentView().katana(snapshot)             // ← overload picked by snapshot type
-            } else {
-                ProgressView().task { snapshot = await App().snapshot() }
-            }
+            ContentView().katana(AppGraph.self)            // ← one line. that's it.
         }
     }
 }
@@ -87,6 +83,24 @@ struct ContentView: View {
 }
 ```
 
+`.katana(AppGraph.self)` is the recommended install — it handles `await AppGraph()`, `snapshot()`, the loading state, and the environment install internally. The framework picks the right `EnvironmentValues` slot via the plugin-emitted `KatanaGraph` conformance.
+
+Pass overrides via the trailing closure if you need them at construction time:
+
+```swift
+ContentView().katana(AppGraph.self) { container in
+    await container.override(Logger.self, with: ProductionLogger())
+}
+```
+
+The default loading view is `Color.clear` (invisible). Customise with `loading:`:
+
+```swift
+ContentView().katana(AppGraph.self, loading: { ProgressView() })
+```
+
+For advanced cases where you already have a `Snapshot` and want to install it manually (cross-scene reuse, test harnesses), the per-graph `.katana(_ snapshot: AppGraph.Snapshot)` overload still exists.
+
 For multiple graphs in the same app, declare a `@Scope` and bind each `@Container` to a case:
 
 ```swift
@@ -94,16 +108,16 @@ For multiple graphs in the same app, declare a `@Scope` and bind each `@Containe
 enum AppScope { case checkout }
 
 @Container(modules: [...])
-final class App {}                                         // .default
+final class AppGraph {}                                    // .default
 
 @Container(scope: .checkout, modules: [...])
-final class Checkout {}
+final class CheckoutGraph {}
 
 // Plugin generates:
-//   - \.katanaDefault, .katana(_:App.Snapshot), bare @Inject
-//   - \.checkout,      .katana(_:Checkout.Snapshot), @Inject(\.checkout)
+//   - \.katanaDefault, .katana(_:AppGraph.Snapshot),      bare @Inject
+//   - \.checkout,      .katana(_:CheckoutGraph.Snapshot), @Inject(\.checkout)
 //
-// They're independent — `@Inject var x: T` reads App; `@Inject(\.checkout) var y: U` reads Checkout.
+// They're independent — `@Inject var x: T` reads AppGraph; `@Inject(\.checkout) var y: U` reads CheckoutGraph.
 ```
 
 ## Testing — `@TestContainer`

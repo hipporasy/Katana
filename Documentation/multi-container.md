@@ -22,21 +22,23 @@ enum AppScope {
 }
 
 @Container(modules: [ServiceModule.self, AuthModule.self])
-final class App {}                                          // implicit .default
+final class AppGraph {}                                     // implicit .default
 
 @Container(scope: .checkout, modules: [CheckoutModule.self])
-final class Checkout {}
+final class CheckoutGraph {}
 
 @Container(scope: .account, modules: [AccountModule.self])
-final class Account {}
+final class AccountGraph {}
 ```
 
 Each graph is its own typed class. The build plugin emits:
 
-- `App.Snapshot`, `Checkout.Snapshot`, `Account.Snapshot` — independent typed resolvers
+- `AppGraph.Snapshot`, `CheckoutGraph.Snapshot`, `AccountGraph.Snapshot` — independent typed resolvers
 - `\.katanaDefault`, `\.checkout`, `\.account` — independent `EnvironmentValues` slots
 - Three `View.katana(_:)` overloads, picked by snapshot type
-- `Inject.init()` only for `App` (the `.default` graph) — bare `@Inject` is reserved for it
+- `Inject.init()` only for `AppGraph` (the `.default` graph) — bare `@Inject` is reserved for it
+
+> **Naming**: don't call your `@Container` class `App` — `SwiftUI.App` is a protocol and `App.Snapshot` / `await App()` will collide in any SwiftUI file. `AppGraph` / `AppContainer` / `Composition` are all clean options.
 
 If two `@Container`s bind to the same scope, the plugin emits a build error pointing at both.
 
@@ -45,8 +47,8 @@ If two `@Container`s bind to the same scope, the plugin emits a build error poin
 For every `@Container`, the plugin generates:
 
 ```swift
-// Plugin-emitted for `Checkout`:
-private struct __Katana_Checkout_SnapshotKey: EnvironmentKey {
+// Plugin-emitted for `CheckoutGraph`:
+private struct __Katana_CheckoutGraph_SnapshotKey: EnvironmentKey {
     static let defaultValue: (any Resolver)? = nil
 }
 
@@ -55,7 +57,7 @@ extension EnvironmentValues {
 }
 
 extension View {
-    func katana(_ snapshot: Checkout.Snapshot) -> some View {
+    func katana(_ snapshot: CheckoutGraph.Snapshot) -> some View {
         environment(\.checkout, snapshot)
     }
 }
@@ -81,64 +83,55 @@ Root tree gets the primary graph:
 ```swift
 @main
 struct MyApp: SwiftUI.App {
-    @State private var snapshot: App.Snapshot?
     var body: some Scene {
         WindowGroup {
-            if let snapshot {
-                RootView().katana(snapshot)
-            } else {
-                ProgressView().task { snapshot = await App().snapshot() }
-            }
+            RootView().katana(AppGraph.self)
         }
     }
 }
 ```
 
-A feature subtree adds its graph only where it's valid:
+A feature subtree adds its graph only where it's valid. The closure form of `.katana(...)` lets you wire in dependencies from the surrounding graph at construction time:
 
 ```swift
 struct CheckoutFlow: View {
-    @Inject var session: AuthSession
-    @State private var checkout: Checkout.Snapshot?
+    @Inject var session: AuthSession                       // from AppGraph
 
     var body: some View {
-        if let checkout {
-            CheckoutRootView().katana(checkout)
-        } else {
-            ProgressView().task {
-                // Pass the session from App into Checkout's graph via the closure init.
-                checkout = await Checkout { c in
-                    await c.override(AuthSession.self, with: session)
-                }.snapshot()
-            }
+        CheckoutRootView().katana(CheckoutGraph.self) { container in
+            await container.override(AuthSession.self, with: session)
         }
     }
 }
 ```
+
+When `CheckoutFlow` disappears, its installed graph deallocates — the lifetime tracks the view's. No global registry to leak.
+
+If you need to share a single graph instance across scenes (e.g. for cross-scene state), the per-graph `.katana(_ snapshot: CheckoutGraph.Snapshot)` overload still exists for manual installs.
 
 When `CheckoutFlow` disappears, `checkout` deallocates — the graph's lifetime tracks the view's. No global registry to leak.
 
 ## Passing dependencies between graphs
 
-The seam is the **closure init**, not double-registration. If `Checkout` needs the `App` graph's `AuthSession`, the parent view resolves it from `App.Snapshot` and overrides the registration in `Checkout`:
+The seam is the **closure init**, not double-registration. If `CheckoutGraph` needs the `AppGraph`'s `AuthSession`, the parent view resolves it from `AppGraph.Snapshot` and overrides the registration in `CheckoutGraph`:
 
 ```swift
-let app = await App()
+let app = await AppGraph()
 let session = await app.resolve(AuthSession.self)
 
-let checkout = await Checkout { c in
+let checkout = await CheckoutGraph { c in
     await c.override(AuthSession.self, with: session)
 }
 ```
 
-This is type-checked: `App` must register `AuthSession` (via some `@Module`), `Checkout` must register `AuthSession` (so the override matches), and the instance flows from one to the other explicitly.
+This is type-checked: `AppGraph` must register `AuthSession` (via some `@Module`), `CheckoutGraph` must register `AuthSession` (so the override matches), and the instance flows from one to the other explicitly.
 
 ## Compile-time safety still applies
 
 Adding a second graph doesn't soften the compile-time guarantees:
 
-- `@Inject var vm: CheckoutViewModel` (bare → `.default`) → **compile error** if `CheckoutViewModel` isn't in `App.Snapshot`.
-- `@Inject(\.checkout) var session: AuthSession` → works only if `Checkout`'s modules register `AuthSession`.
+- `@Inject var vm: CheckoutViewModel` (bare → `.default`) → **compile error** if `CheckoutViewModel` isn't in `AppGraph.Snapshot`.
+- `@Inject(\.checkout) var session: AuthSession` → works only if `CheckoutGraph`'s modules register `AuthSession`.
 
 The `@Module` set per `@Container` is the safety contract. Refactor a dep into the wrong graph and the build catches you.
 

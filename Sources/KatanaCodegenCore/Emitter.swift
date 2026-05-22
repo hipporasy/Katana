@@ -168,6 +168,7 @@ public enum Emitter {
         let keyType = "__Katana_\(container.name)_SnapshotKey"
         let avail = container.availability.map { "\($0)\n" } ?? ""
         let snapshotType = "\(container.name).Snapshot"
+        let name = container.name
 
         var body = "#if canImport(SwiftUI)\n"
         body += "private struct \(keyType): EnvironmentKey {\n"
@@ -179,9 +180,18 @@ public enum Emitter {
         body += "        set { self[\(keyType).self] = newValue }\n"
         body += "    }\n"
         body += "}\n\n"
+        // Manual install — takes a pre-built snapshot. For when the caller
+        // already manages the @State (e.g. cross-scene reuse).
         body += "\(avail)extension View {\n"
         body += "    \(access)func katana(_ snapshot: \(snapshotType)) -> some View {\n"
         body += "        environment(\\.\(envKey), snapshot)\n"
+        body += "    }\n"
+        body += "}\n\n"
+        // KatanaGraph conformance — enables the one-line `.katana(\(name).self)`
+        // install modifier from Katana/KatanaGraph.swift.
+        body += "\(avail)extension \(name): KatanaGraph {\n"
+        body += "    \(access)static var environmentKeyPath: WritableKeyPath<EnvironmentValues, (any Resolver)?> {\n"
+        body += "        \\.\(envKey)\n"
         body += "    }\n"
         body += "}\n"
         body += "#endif\n"

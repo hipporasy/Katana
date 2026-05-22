@@ -44,11 +44,11 @@ The macros generate every wiring detail. The `KatanaCodegen` build plugin aggreg
 
 ## Install
 
-Add to your `Package.swift`:
+The package exposes **two products**: `Katana` (the library) and `KatanaCodegenPlugin` (the build plugin). Add both on any target that uses `@Container`.
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/hipporasy/Katana.git", from: "0.2.0"),
+    .package(url: "https://github.com/hipporasy/Katana.git", from: "0.1.1"),
 ],
 targets: [
     .target(
@@ -60,6 +60,22 @@ targets: [
 ```
 
 Then `import Katana`.
+
+In Xcode, **File → Add Packages…** shows the same two products in the picker — the demo executables (`Example`, `ModularExample`, `KatanaClient`) are private to the package and won't appear.
+
+## Publishing (for maintainers)
+
+SwiftPM has no central registry — publishing is a git push:
+
+```bash
+git push                                       # main branch
+git tag 0.1.1                                  # SemVer; leading "v" optional
+git push --tags
+```
+
+Consumers resolve immediately. Optionally register with [Swift Package Index](https://swiftpackageindex.com/add-a-package) for discoverability — it auto-detects tags and renders docs.
+
+See [`CHANGELOG.md`](CHANGELOG.md) for what's in each release and [`Documentation/roadmap.md`](Documentation/roadmap.md) for the release checklist.
 
 > The build plugin is mandatory. `@Container` only emits storage stubs at macro-expansion time; the typed API, the `EnvironmentValues` slot, and the install modifier are emitted by the plugin before compilation.
 
@@ -151,18 +167,13 @@ final class RequestContext { … }  // non-Sendable is fine
 
 ```swift
 @Container(modules: [AppModule.self])
-final class App {}
+final class AppGraph {}                          // ← not `App` — collides with SwiftUI.App
 
 @main
 struct MyApp: SwiftUI.App {
-    @State private var snapshot: App.Snapshot?
     var body: some Scene {
         WindowGroup {
-            if let snapshot {
-                RootView().katana(snapshot)      // overload picked by snapshot type
-            } else {
-                ProgressView().task { snapshot = await App().snapshot() }
-            }
+            RootView().katana(AppGraph.self)     // ← one line. handles build, snapshot, install.
         }
     }
 }
@@ -173,7 +184,19 @@ struct ContentView: View {
 }
 ```
 
-`App.snapshot()` eagerly resolves every registered singleton into a typed `App.Snapshot`. The plugin emits `Inject.init()` reading from `\.katanaDefault`, so SwiftUI views never touch the container directly. **One install at the root, infinite reads, zero per-view-model wiring.**
+`.katana(AppGraph.self)` is the recommended install. It builds `AppGraph`, calls `snapshot()`, manages the loading state internally, and installs the snapshot in the right `EnvironmentValues` slot via the plugin-emitted `KatanaGraph` conformance.
+
+Pass overrides via the trailing closure if you need them at construction time:
+
+```swift
+RootView().katana(AppGraph.self) { container in
+    await container.override(Logger.self, with: ProductionLogger())
+}
+```
+
+For advanced cases where you have a pre-built snapshot, the per-graph `.katana(_ snapshot: AppGraph.Snapshot)` overload still exists.
+
+**One install at the root, infinite reads, zero per-view-model wiring.**
 
 ## Multiple graphs — `@Scope` + custom scopes
 

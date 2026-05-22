@@ -5,11 +5,12 @@ import CompilerPluginSupport
 let package = Package(
     name: "Katana",
     platforms: [.macOS(.v13), .iOS(.v13), .tvOS(.v13), .watchOS(.v6), .macCatalyst(.v13)],
+    // Public products — these are what `swift package` consumers see in the
+    // "Add Package Products" dialog. Internal targets (the demo executables,
+    // the codegen executable + core, the macro module) stay private to the
+    // package so the dependency surface stays small.
     products: [
         .library(name: "Katana", targets: ["Katana"]),
-        .executable(name: "KatanaClient", targets: ["KatanaClient"]),
-        .executable(name: "Example", targets: ["Example"]),
-        .executable(name: "ModularExample", targets: ["ModularExample"]),
         .plugin(name: "KatanaCodegenPlugin", targets: ["KatanaCodegenPlugin"]),
     ],
     dependencies: [
